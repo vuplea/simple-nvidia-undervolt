@@ -1,0 +1,8 @@
+title: simple-nvidia-undervolt
+description: >-
+  Command-line NVIDIA GPU undervolting for Windows — a lightweight MSI
+  Afterburner alternative. Caps voltage by flattening the V/F curve,
+  no background process. Tested on RTX 5090 (Blackwell).
+theme: jekyll-theme-slate
+plugins:
+  - jekyll-seo-tag

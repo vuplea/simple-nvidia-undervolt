@@ -1,0 +1,197 @@
+namespace SimpleNvidiaUndervolt.Tests;
+
+/// <summary>Tests for parsing and resolving the <c>undervolt</c> command's inputs: the mutually
+/// exclusive voltage/clock forms, their validation, and how offsets/percentages resolve against the
+/// curve and the peak operating point.</summary>
+public class UndervoltRequestTests
+{
+    private static UndervoltRequest Parse(params string[] args) => UndervoltRequest.Parse(args);
+
+    // --- Validation (UndervoltRequest.Parse) ---
+
+    [Fact]
+    public void MissingVoltageCap_Throws()
+    {
+        Assert.Throws<NvApiException>(() => Parse("undervolt"));
+    }
+
+    [Fact]
+    public void TwoVoltageForms_Throws()
+    {
+        Assert.Throws<NvApiException>(() => Parse("undervolt", "--mv", "960", "--mv-offset", "-50"));
+    }
+
+    [Fact]
+    public void TwoClockForms_Throws()
+    {
+        Assert.Throws<NvApiException>(
+            () => Parse("undervolt", "--mv", "960", "--mhz", "2800", "--mhz-offset", "-50"));
+    }
+
+    [Theory]
+    [InlineData("--mv-offset")]
+    [InlineData("--mv-pct")]
+    public void NonNegativeVoltageReduction_Throws(string flag)
+    {
+        Assert.Throws<NvApiException>(() => Parse("undervolt", flag, "50", "--peak-mv", "1060"));
+    }
+
+    [Fact]
+    public void RelativeFormWithoutAReferencePoint_Throws()
+    {
+        Assert.Throws<NvApiException>(() => Parse("undervolt", "--mv-offset", "-100"));
+    }
+
+    [Fact]
+    public void NonNumericValue_Throws()
+    {
+        Assert.Throws<NvApiException>(() => Parse("undervolt", "--mv", "lots"));
+    }
+
+    [Fact]
+    public void CapPoints_DefaultsToTen()
+    {
+        Assert.Equal(10, Parse("undervolt", "--mv", "960").CapPoints);
+        Assert.Equal(UndervoltRequest.DefaultCapPoints, Parse("undervolt", "--mv", "960").CapPoints);
+    }
+
+    [Fact]
+    public void CapPoints_TakesTheGivenValue()
+    {
+        Assert.Equal(3, Parse("undervolt", "--mv", "960", "--cap-points", "3").CapPoints);
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-2")]
+    public void CapPoints_BelowOne_Throws(string n)
+    {
+        Assert.Throws<NvApiException>(() => Parse("undervolt", "--mv", "960", "--cap-points", n));
+    }
+
+    // --- Resolution (UndervoltRequest.Resolve) ---
+
+    [Fact]
+    public void AbsoluteVoltage_ResolvesUnchanged()
+    {
+        var (capMv, targetMhz) = Parse("undervolt", "--mv", "960").Resolve(TestCurves.Realistic());
+        Assert.Equal(960, capMv);
+        Assert.Null(targetMhz);
+    }
+
+    [Fact]
+    public void VoltageOffset_AppliesToTheGivenPeak()
+    {
+        var (capMv, _) = Parse("undervolt", "--mv-offset", "-100", "--peak-mv", "1060")
+            .Resolve(TestCurves.Realistic());
+        Assert.Equal(960, capMv);
+    }
+
+    [Fact]
+    public void VoltagePercent_AppliesToTheGivenPeak()
+    {
+        var (capMv, _) = Parse("undervolt", "--mv-pct", "-10", "--peak-mv", "1000")
+            .Resolve(TestCurves.Realistic());
+        Assert.Equal(900, capMv);
+    }
+
+    [Fact]
+    public void ClockOffset_AppliesToTheGivenPeak()
+    {
+        var (capMv, targetMhz) = Parse("undervolt", "--mv", "960", "--mhz-offset", "-50", "--peak-mhz", "2880")
+            .Resolve(TestCurves.Realistic());
+        Assert.Equal(960, capMv);
+        Assert.Equal(2830, targetMhz);
+    }
+
+    [Fact]
+    public void MissingPeakCoordinate_IsReadOffTheCurve()
+    {
+        // Only --peak-mhz is given; the peak voltage is interpolated from the curve, then the offset
+        // applied. 2880 MHz falls between (1140 mV, 2850 MHz) and (1160 mV, 2900 MHz) -> 1152 mV.
+        var (capMv, _) = Parse("undervolt", "--mv-offset", "-100", "--peak-mhz", "2880")
+            .Resolve(TestCurves.Realistic());
+        Assert.Equal(1052, capMv);
+    }
+
+    [Fact]
+    public void MissingPeakCoordinateOnAnIdleCurve_Throws()
+    {
+        Assert.Throws<NvApiException>(
+            () => Parse("undervolt", "--mv-offset", "-100", "--peak-mhz", "2880").Resolve(TestCurves.Collapsed()));
+    }
+
+    [Fact]
+    public void CapAboveThePeak_Throws()
+    {
+        Assert.Throws<NvApiException>(
+            () => Parse("undervolt", "--mv", "1100", "--peak-mv", "1000").Resolve(TestCurves.Realistic()));
+    }
+
+    [Theory]
+    [InlineData("300")]    // below the plausible floor
+    [InlineData("1300")]   // above the plausible ceiling
+    public void ImplausibleVoltage_Throws(string mv)
+    {
+        Assert.Throws<NvApiException>(() => Parse("undervolt", "--mv", mv).Resolve(TestCurves.Realistic()));
+    }
+
+    // --- Memory clock ---
+
+    [Fact]
+    public void NoMemoryFlag_MeansNoMemoryChange()
+    {
+        Assert.False(Parse("undervolt", "--mv", "960").UsesMemory);
+    }
+
+    [Fact]
+    public void AbsoluteMemory_ResolvesToTheDeltaFromBase()
+    {
+        var request = Parse("undervolt", "--mv", "960", "--mem", "15000");
+        Assert.True(request.UsesMemory);
+        Assert.Equal((15000, 999_000), request.ResolveMemory(baseMemMhz: 14001));
+    }
+
+    [Fact]
+    public void MemoryOffset_IsTheDeltaDirectly()
+    {
+        var (target, deltaKhz) = Parse("undervolt", "--mv", "960", "--mem-offset", "1000").ResolveMemory(14001);
+        Assert.Equal(15001, target);
+        Assert.Equal(1_000_000, deltaKhz);
+    }
+
+    [Fact]
+    public void NegativeMemoryOffset_Downclocks()
+    {
+        var (target, deltaKhz) = Parse("undervolt", "--mv", "960", "--mem-offset", "-500").ResolveMemory(14001);
+        Assert.Equal(13501, target);
+        Assert.Equal(-500_000, deltaKhz);
+    }
+
+    [Fact]
+    public void MemoryPercent_AppliesToBase()
+    {
+        var (target, deltaKhz) = Parse("undervolt", "--mv", "960", "--mem-pct", "10").ResolveMemory(14000);
+        Assert.Equal(15400, target);
+        Assert.Equal(1_400_000, deltaKhz);
+    }
+
+    [Fact]
+    public void MemoryAtBase_IsAZeroDelta()
+    {
+        Assert.Equal((14001, 0), Parse("undervolt", "--mv", "960", "--mem", "14001").ResolveMemory(14001));
+    }
+
+    [Fact]
+    public void TwoMemoryForms_Throws()
+    {
+        Assert.Throws<NvApiException>(() => Parse("undervolt", "--mv", "960", "--mem", "15000", "--mem-offset", "500"));
+    }
+
+    [Fact]
+    public void ImplausibleMemory_Throws()
+    {
+        Assert.Throws<NvApiException>(
+            () => Parse("undervolt", "--mv", "960", "--mem", "5000").ResolveMemory(baseMemMhz: 14001));
+    }
+}
