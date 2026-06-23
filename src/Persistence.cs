@@ -48,7 +48,6 @@ internal static class Persistence
         RunSchtasks("/Create", "/F", "/TN", TaskName, "/SC", "ONLOGON", "/RL", "HIGHEST", "/TR", taskRun);
         log.Add($"Registered logon task '{TaskName}'.");
         log.Add($"Runs: {taskRun}");
-        log.Add("Disable with: simple-nvidia-undervolt unpersist");
 
         return log;
     }
