@@ -25,6 +25,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="SimpleNvidiaUndervolt.Tests" />
+    <InternalsVisibleTo Include="SimpleNvidiaUndervolt.E2E" />
   </ItemGroup>
 
 </Project>

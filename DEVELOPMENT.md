@@ -11,7 +11,12 @@ different GPU.
 dotnet build src -c Release
 src/bin/simple-nvidia-undervolt.exe status
 dotnet test tests   # pure-logic unit tests (no GPU required)
+dotnet test e2e     # real GPU read/write tests; run as Administrator (see e2e/README.md)
 ```
+
+The `e2e` project drives the real driver (writing tuning and reading it back). Its tests skip unless the
+host is elevated with an NVIDIA GPU, and they restore the tuning they find — see
+[e2e/README.md](e2e/README.md).
 
 For a standalone, single-file executable with no .NET runtime dependency, publish with Native AOT (needs
 the Visual C++ build tools / `vswhere.exe` on PATH):

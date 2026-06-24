@@ -117,12 +117,27 @@ public class UndervoltRequestTests
     }
 
     [Fact]
+    public void AbsoluteClock_ResolvesUnchanged()
+    {
+        var (_, targetMhz) = Parse("undervolt", "--mv", "960", "--mhz", "2880").Resolve(TestCurves.Realistic());
+        Assert.Equal(2880, targetMhz);
+    }
+
+    [Fact]
     public void ClockOffset_AppliesToTheGivenPeak()
     {
         var (capMv, targetMhz) = Parse("undervolt", "--mv", "960", "--mhz-offset", "-50", "--peak-mhz", "2880")
             .Resolve(TestCurves.Realistic());
         Assert.Equal(960, capMv);
         Assert.Equal(2830, targetMhz);
+    }
+
+    [Fact]
+    public void ClockPercent_AppliesToTheGivenPeak()
+    {
+        var (_, targetMhz) = Parse("undervolt", "--mv", "960", "--mhz-pct", "5", "--peak-mhz", "2800")
+            .Resolve(TestCurves.Realistic());
+        Assert.Equal(2940, targetMhz); // 2800 * 1.05
     }
 
     [Fact]

@@ -21,7 +21,7 @@ simple-nvidia-undervolt undervolt --mv 925 --no-persist
 # Same as the first, via offsets from a watch reading of 1060 mV / 2880 MHz:
 simple-nvidia-undervolt undervolt --mv-offset -100 --mhz-offset 0 --peak-mv 1060
 # Percentage adjusting - 5% reduction of max voltage, 2% increase of max compute and memory frequency:
-simple-nvidia-undervolt undervolt --mv-pct -5 --mhz-pct 2 -mem-pct 2 --peak-mv 1060
+simple-nvidia-undervolt undervolt --mv-pct -5 --mhz-pct 2 --mem-pct 2 --peak-mv 1060
 ```
 
 ## Usage

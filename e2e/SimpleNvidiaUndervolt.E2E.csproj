@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Matches the main project's TFM so it can reference the net10.0-windows assembly directly. -->
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <!-- These tests drive the real driver; nothing about them is safe to run in parallel. -->
+    <AssemblyName>SimpleNvidiaUndervolt.E2E</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <!-- Lets a test report "skipped" at runtime when the host isn't elevated / has no GPU / is idle. -->
+    <PackageReference Include="Xunit.SkippableFact" Version="1.5.23" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\src\simple-nvidia-undervolt.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+</Project>
