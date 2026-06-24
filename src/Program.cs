@@ -19,12 +19,75 @@ internal static class Cli
         }
 
         string command = args.FirstOrDefault(a => !a.StartsWith('-')) ?? "status";
-        ErrorReporter.UseMessageBox = args.Contains("--msgbox");
+
+        // A relay child (spawned by auto-elevation) writes its console output back to the non-elevated
+        // parent through this pipe; a top-level --interactive run tees its output into a message box.
+        string? pipeName = ArgValue(args, "--pipe-name");
+        bool isRelayChild = pipeName is not null;
+        IDisposable? childRedirect = isRelayChild ? ElevationRelay.RedirectToParent(pipeName!) : null;
+        InteractiveOutput? interactive =
+            InteractiveOutput.Install(isRelayChild ? InteractiveMode.Off : InteractiveOutput.ParseMode(args));
+
+        int exit = 1;
+        try
+        {
+            exit = Dispatch(command, args, isRelayChild);
+        }
+        finally
+        {
+            childRedirect?.Dispose();  // flush + close the pipe so the parent sees end-of-output
+            interactive?.Complete(exit);
+        }
+
+        return exit;
+    }
+
+    private static int Dispatch(string command, string[] args, bool isRelayChild)
+    {
+        string lower = command.ToLowerInvariant();
 
         // Disabling persistence is just task/file cleanup - no GPU or driver needed.
-        if (command.Equals("unpersist", StringComparison.OrdinalIgnoreCase))
+        if (lower == "unpersist")
         {
             return RunUnpersist();
+        }
+
+        UndervoltRequest? request = null;
+        if (lower == "undervolt")
+        {
+            try
+            {
+                request = UndervoltRequest.Parse(args);
+            }
+            catch (NvApiException ex)
+            {
+                ErrorReporter.Report(ex.Message);
+                return 2;
+            }
+
+            // Saving the shortcut needs neither the GPU nor elevation, and belongs in the original
+            // (non-elevated) working directory - so do it here, before any hand-off to an elevated child.
+            if (request.SaveShortcut && !isRelayChild)
+            {
+                try
+                {
+                    Console.WriteLine(Shortcut.SaveUndervolt(args, request));
+                }
+                catch (NvApiException ex)
+                {
+                    ErrorReporter.Report($"Could not save the shortcut: {ex.Message}");
+                    return 1;
+                }
+            }
+        }
+
+        // The write commands need administrator rights (a dry run writes nothing). When not already
+        // elevated, relaunch elevated and relay that instance's output back here - unless --no-elevate,
+        // which runs in place (the driver write then likely fails, with a warning).
+        bool needsElevation = lower == "clear" || (lower == "undervolt" && !request!.DryRun);
+        if (needsElevation && !isRelayChild && !args.Contains("--no-elevate") && !Elevation.IsElevated())
+        {
+            return ElevationRelay.Elevate(args);
         }
 
         try
@@ -49,10 +112,10 @@ internal static class Cli
             // Operate on the first NVIDIA GPU; a multi-GPU selector isn't worth the surface here.
             IntPtr gpu = gpus[0];
 
-            return command.ToLowerInvariant() switch
+            return lower switch
             {
                 "status" => RunStatus(gpu),
-                "undervolt" => RunUndervolt(gpu, args),
+                "undervolt" => RunUndervolt(gpu, args, request!),
                 "clear" => RunClear(gpu),
                 "scan" => Diagnostics.Scan(gpu, args),
                 "snapshot" => Diagnostics.Snapshot(gpu),
@@ -78,6 +141,19 @@ internal static class Cli
         {
             NvApi.Unload();
         }
+    }
+
+    private static string? ArgValue(string[] args, string flag)
+    {
+        for (int i = 0; i < args.Length - 1; i++)
+        {
+            if (args[i] == flag)
+            {
+                return args[i + 1];
+            }
+        }
+
+        return null;
     }
 
     private static int UnknownCommand(string command)
@@ -113,14 +189,21 @@ internal static class Cli
     {
         Console.WriteLine($"Resetting {SafeName(gpu)} to stock "
                           + "(core V/F curve, memory offset and voltage boost).");
-
-        if (!Elevation.IsElevated())
-        {
-            Console.WriteLine("Warning: not running as Administrator - NVAPI may reject the changes.");
-        }
+        WarnIfNotElevated();
 
         GpuTuning.Clear(gpu);
         return 0;
+    }
+
+    /// <summary>A write command only reaches here non-elevated when --no-elevate suppressed the
+    /// auto-elevation relay; the driver will likely reject the write, so flag it.</summary>
+    private static void WarnIfNotElevated()
+    {
+        if (!Elevation.IsElevated())
+        {
+            Console.WriteLine("Warning: not running as Administrator (--no-elevate) - "
+                              + "the driver may reject the changes.");
+        }
     }
 
     private static int RunUnpersist()
@@ -142,31 +225,15 @@ internal static class Cli
         }
     }
 
-    private static int RunUndervolt(IntPtr gpu, string[] args)
+    private static int RunUndervolt(IntPtr gpu, string[] args, UndervoltRequest request)
     {
-        UndervoltRequest request;
-        try
-        {
-            request = UndervoltRequest.Parse(args);
-        }
-        catch (NvApiException ex)
-        {
-            ErrorReporter.Report(ex.Message);
-            return 2;
-        }
-
         Console.WriteLine(request.DryRun
             ? $"Dry run for {SafeName(gpu)} - nothing will be written:"
             : $"Undervolting {SafeName(gpu)}:");
 
-        if (request.Persist && request.DryRun)
+        if (!request.DryRun)
         {
-            Console.WriteLine("  (--persist is ignored on a dry run.)");
-        }
-
-        if (!request.DryRun && !Elevation.IsElevated())
-        {
-            Console.WriteLine("Warning: not running as Administrator - NVAPI may reject the changes.");
+            WarnIfNotElevated();
         }
 
         try
@@ -224,6 +291,14 @@ internal static class Cli
             return 1;
         }
 
+        if (!request.DryRun && request.RenameShortcut)
+        {
+            foreach (string line in Shortcut.MarkActive(Shortcut.ResolveName(request)))
+            {
+                Console.WriteLine($"  {line}");
+            }
+        }
+
         if (request.Persist && !request.DryRun)
         {
             try
@@ -245,7 +320,7 @@ internal static class Cli
         {
             Console.WriteLine(request.Persist
                 ? "Done. Use 'clear' to restore stock, or 'unpersist' to stop re-applying at logon."
-                : "Done. Use 'clear' to restore stock, or --persist to re-apply it at logon.");
+                : "Done (not persisted). Use 'clear' to restore stock; omit --no-persist to re-apply at logon.");
         }
 
         return 0;
@@ -266,7 +341,7 @@ internal static class Cli
                                                         tracking the running max (Ctrl+C to stop).
               simple-nvidia-undervolt clear             Reset all tuning to the driver default.
               simple-nvidia-undervolt unpersist         Stop re-applying an undervolt at startup
-                                                        (removes the --persist logon task).
+                                                        (removes the logon task).
 
             undervolt - voltage cap (required, choose one):
               --mv <n>           Cap voltage at this absolute value (mV).
@@ -289,23 +364,38 @@ internal static class Cli
               --cap-points <n>   Curve anchors holding the cap's offset, counting down from the cap
                                  (cap included; default 10). A wider band keeps the clock if the boost
                                  settles a bin or two below the cap; 1 = only the cap point.
-              --persist          Install to LocalAppData and re-apply this undervolt at logon, via a
-                                 Task Scheduler task (which runs with --msgbox so a startup failure
-                                 shows). Undo with the 'unpersist' command.
+              --no-persist       Don't persist. By default a real undervolt installs to LocalAppData and
+                                 registers a Task Scheduler logon task that re-applies it at startup (a
+                                 failure shows a message box, so it isn't a silent no-op). 'unpersist'
+                                 removes the task.
+              --save-shortcut [name]
+                                 Write a .lnk that re-applies this undervolt (with --interactive). <name>
+                                 may be a name or a path (.lnk appended if missing); default is the
+                                 current directory, named for these settings.
+              --no-shortcut-rename
+                                 Don't touch the .lnk files. By default a successful apply renames the
+                                 matching link in the current directory to "[ACTIVE] ..." and clears the
+                                 marker from the other marked links there.
+              --no-elevate       Don't auto-elevate; run in place even without admin (the write then
+                                 likely fails).
               --dry-run          Compute and print the curve changes without writing.
             Each real run resets the GPU to stock first, then applies the cap.
 
             Options:
-              --msgbox         Also show errors in a Windows message box.
-              -h, --help       Show this help.
+              --interactive [errors]  Show the run's output in a message box when it ends (useful when
+                                      launched from a shortcut, where the console closes on exit). Add
+                                      'errors' to show the box only if the run fails.
+              -h, --help              Show this help.
 
             Notes:
-              * 'undervolt' and 'clear' write to the driver and must run from an Administrator
-                terminal; 'status', 'watch' and the diagnostics are read-only and do not.
+              * 'undervolt' and 'clear' write to the driver and need administrator rights; if run from a
+                normal terminal they prompt for elevation. 'status', 'watch' and the diagnostics are
+                read-only and never elevate.
               * After applying, 'undervolt' reads the effective curve back and reports whether the
                 clock at the cap was reached or smoothed/limited by the driver.
-              * Writes affect the live driver state only; they do not delete saved profiles, and
-                everything reverts on reboot or when Afterburner re-applies a profile.
+              * A real 'undervolt' persists by default: it re-applies at logon, so it survives a reboot
+                unless you pass --no-persist. Writes change live driver state only; they never touch your
+                saved Afterburner profiles.
 
             Run 'simple-nvidia-undervolt --help-diagnostics' for the NVAPI inspection commands.
             """);
@@ -326,23 +416,6 @@ internal static class Cli
               extent <hexId>   Measure the real struct size the driver writes for a function.
               raw <hexId> <ver> <size>  Dump the raw 32-bit words a GET writes.
             """);
-    }
-}
-
-internal static class Elevation
-{
-    public static bool IsElevated()
-    {
-        try
-        {
-            using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
-            var principal = new System.Security.Principal.WindowsPrincipal(identity);
-            return principal.IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
-        }
-        catch
-        {
-            return false;
-        }
     }
 }
 
@@ -380,8 +453,22 @@ internal sealed class UndervoltRequest
     /// cap's frequency offset — a wider band keeps the clock if the boost settles below the cap.</summary>
     public int CapPoints { get; private init; }
 
-    /// <summary>Install the app and register a logon task that re-applies this undervolt at startup.</summary>
+    /// <summary>Install the app and register a logon task that re-applies this undervolt at startup.
+    /// On by default for a real run; <c>--no-persist</c> turns it off.</summary>
     public bool Persist { get; private init; }
+
+    /// <summary>Drop a <c>.lnk</c> in the current directory that re-runs this undervolt interactively.</summary>
+    public bool SaveShortcut { get; private init; }
+
+    /// <summary>An explicit name for the shortcut/active link, from <c>--save-shortcut &lt;name&gt;</c> (when
+    /// saving) or the hidden <c>--shortcut-name</c> baked into a saved link (when launched from one).
+    /// Null falls back to the settings-derived name.</summary>
+    public string? ShortcutNameOverride { get; private init; }
+
+    /// <summary>After a successful apply, rename the matching <c>.lnk</c> in the current directory to
+    /// <c>[ACTIVE] …</c> and clear the marker from the others. On by default; <c>--no-shortcut-rename</c>
+    /// turns it off.</summary>
+    public bool RenameShortcut { get; private init; }
 
     public bool DryRun { get; private init; }
 
@@ -404,7 +491,10 @@ internal sealed class UndervoltRequest
             PeakMv = Number(args, "--peak-mv"),
             PeakMhz = Number(args, "--peak-mhz"),
             CapPoints = Number(args, "--cap-points") is { } cp ? (int)Math.Round(cp) : DefaultCapPoints,
-            Persist = args.Contains("--persist"),
+            Persist = !args.Contains("--no-persist"),
+            SaveShortcut = args.Contains("--save-shortcut"),
+            ShortcutNameOverride = OptionalValue(args, "--save-shortcut") ?? OptionalValue(args, "--shortcut-name"),
+            RenameShortcut = !args.Contains("--no-shortcut-rename"),
             DryRun = args.Contains("--dry-run"),
         };
 
@@ -528,6 +618,19 @@ internal sealed class UndervoltRequest
     }
 
     private static int Count(params double?[] values) => values.Count(v => v is not null);
+
+    /// <summary>The token following <paramref name="flag"/> when it is present and not itself another
+    /// flag (i.e. an optional value), else null.</summary>
+    private static string? OptionalValue(string[] args, string flag)
+    {
+        int i = Array.IndexOf(args, flag);
+        if (i < 0 || i + 1 >= args.Length || args[i + 1].StartsWith('-'))
+        {
+            return null;
+        }
+
+        return args[i + 1];
+    }
 
     private static double? Number(string[] args, string flag)
     {

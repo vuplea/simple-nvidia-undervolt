@@ -1,33 +1,17 @@
 using System.Diagnostics;
-using System.Runtime.InteropServices;
 
 namespace SimpleNvidiaUndervolt;
 
-/// <summary>Reports errors to stderr and, when <see cref="UseMessageBox"/> is set, also in a Windows
-/// message box — so a failure is visible when there is no console to watch, e.g. the scheduled task
-/// that re-applies an undervolt at logon.</summary>
+/// <summary>Reports errors to stderr. When no console is watching (a shortcut or the logon task), the
+/// <c>--interactive</c> message box surfaces them instead — it captures stderr too.</summary>
 internal static class ErrorReporter
 {
-    public static bool UseMessageBox { get; set; }
-
-    public static void Report(string message)
-    {
-        Console.Error.WriteLine(message);
-        if (UseMessageBox)
-        {
-            MessageBoxW(IntPtr.Zero, message, "nvidia-simple-undervolt", MB_OK | MB_ICONERROR);
-        }
-    }
-
-    private const uint MB_OK = 0x0;
-    private const uint MB_ICONERROR = 0x10;
-
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    private static extern int MessageBoxW(IntPtr hWnd, string text, string caption, uint type);
+    public static void Report(string message) => Console.Error.WriteLine(message);
 }
 
 /// <summary>Makes an undervolt survive a reboot: copies the app into LocalAppData and registers a
-/// Task Scheduler logon task that re-runs it (with <c>--msgbox</c>, so a startup failure is visible).
+/// Task Scheduler logon task that re-runs it (with <c>--interactive errors</c>, so a startup failure is
+/// visible).
 /// The <c>unpersist</c> command undoes both.</summary>
 internal static class Persistence
 {
@@ -42,8 +26,8 @@ internal static class Persistence
         log.Add($"Installed to {targetDir}");
 
         // Run at logon (not at boot): the task then lives in the user's interactive session, so it can
-        // reach the GPU and a --msgbox error is actually on screen. /RL HIGHEST runs it elevated, which
-        // the driver writes need.
+        // reach the GPU and an --interactive error box is actually on screen. /RL HIGHEST runs it
+        // elevated, which the driver writes need.
         string taskRun = $"\"{targetExe}\" {string.Join(' ', StartupArgs(undervoltArgs))}";
         RunSchtasks("/Create", "/F", "/TN", TaskName, "/SC", "ONLOGON", "/RL", "HIGHEST", "/TR", taskRun);
         log.Add($"Registered logon task '{TaskName}'.");
@@ -91,16 +75,47 @@ internal static class Persistence
         return Path.Combine(targetDir, exeName);
     }
 
-    /// <summary>The args the logon task runs: the original undervolt args minus <c>--persist</c> and
-    /// <c>--dry-run</c>, with <c>--msgbox</c> added so a startup failure shows a message box.</summary>
+    /// <summary>The args the logon task runs: the original undervolt args stripped of every flag that
+    /// doesn't belong to an unattended, already-elevated re-apply, then the fixed set this task needs.
+    /// The task is itself the persistence, runs from no fixed directory and is already elevated, so it
+    /// must not re-persist (<c>--no-persist</c>), must not touch links (<c>--no-shortcut-rename</c>), and
+    /// surfaces failures through a box (<c>--interactive errors</c>) since no console is watching.</summary>
     internal static IReadOnlyList<string> StartupArgs(string[] args)
     {
-        var kept = args.Where(a => a is not ("--persist" or "--dry-run")).ToList();
-        if (!kept.Contains("--msgbox"))
+        var kept = new List<string>();
+        for (int i = 0; i < args.Length; i++)
         {
-            kept.Add("--msgbox");
+            // Flags carrying a mandatory following value - drop the value too.
+            if (args[i] is "--pipe-name" or "--shortcut-name")
+            {
+                i++;
+                continue;
+            }
+
+            // Flags carrying an optional following value (a non-flag token).
+            if (args[i] is "--interactive" or "--save-shortcut")
+            {
+                if (i + 1 < args.Length && !args[i + 1].StartsWith('-'))
+                {
+                    i++;
+                }
+
+                continue;
+            }
+
+            if (args[i] is "--persist" or "--no-persist" or "--dry-run"
+                or "--no-shortcut-rename" or "--no-elevate")
+            {
+                continue;
+            }
+
+            kept.Add(args[i]);
         }
 
+        kept.Add("--no-persist");
+        kept.Add("--no-shortcut-rename");
+        kept.Add("--interactive");
+        kept.Add("errors");
         return kept;
     }
 

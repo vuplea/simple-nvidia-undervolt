@@ -69,6 +69,27 @@ public class UndervoltRequestTests
         Assert.Throws<NvApiException>(() => Parse("undervolt", "--mv", "960", "--cap-points", n));
     }
 
+    [Fact]
+    public void PersistAndRenameShortcut_DefaultOn_OptOutFlagsTurnThemOff()
+    {
+        var defaults = Parse("undervolt", "--mv", "960");
+        Assert.True(defaults.Persist);
+        Assert.True(defaults.RenameShortcut);
+
+        var opted = Parse("undervolt", "--mv", "960", "--no-persist", "--no-shortcut-rename");
+        Assert.False(opted.Persist);
+        Assert.False(opted.RenameShortcut);
+    }
+
+    [Fact]
+    public void ShortcutNameOverride_FromSaveShortcutOrShortcutName_ElseNull()
+    {
+        Assert.Null(Parse("undervolt", "--mv", "960").ShortcutNameOverride);
+        Assert.Null(Parse("undervolt", "--mv", "960", "--save-shortcut").ShortcutNameOverride);
+        Assert.Equal("My OC", Parse("undervolt", "--mv", "960", "--save-shortcut", "My OC").ShortcutNameOverride);
+        Assert.Equal("My OC", Parse("undervolt", "--mv", "960", "--shortcut-name", "My OC").ShortcutNameOverride);
+    }
+
     // --- Resolution (UndervoltRequest.Resolve) ---
 
     [Fact]

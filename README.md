@@ -3,13 +3,26 @@
 A small Windows command-line alternative to MSI Afterburner for undervolting an NVIDIA GPU. It talks to
 the driver directly — no background process — and caps voltage by flattening the V/F curve.
 
-Undervolting an NVIDIA GPU shouldn't mean dragging 127 points around a curve editor. **Only one segment
+Undervolting an NVIDIA GPU shouldn't mean dragging points around a curve editor. **Only one segment
 matters** — the max voltage and the clock you run there — because that's where the card sits at max
 load, and it impacts your peak framerate. The rest of the curve is ignored at idle and irrelevant at max
 load. To simplify, you can just set your desired voltage and frequency pair with this tool.
 
 > ⚠️ **Should work on GTX 10 (Pascal), RTX 20 (Turing), RTX 30 (Ampere), RTX 40 (Ada),
 > RTX 50 (Blackwell) generations, but currently validated only on Blackwell.**
+
+### Examples
+
+```powershell
+# Cap 960 mV, hold 2880 MHz there (re-applied at logon):
+simple-nvidia-undervolt undervolt --mv 960 --mhz 2880
+# Cap 925 mV, keep the stock clock for that voltage; don't persist:
+simple-nvidia-undervolt undervolt --mv 925 --no-persist
+# Same as the first, via offsets from a watch reading of 1060 mV / 2880 MHz:
+simple-nvidia-undervolt undervolt --mv-offset -100 --mhz-offset 0 --peak-mv 1060
+# Percentage adjusting - 5% reduction of max voltage, 2% increase of max compute and memory frequency:
+simple-nvidia-undervolt undervolt --mv-pct -5 --mhz-pct 2 -mem-pct 2 --peak-mv 1060
+```
 
 ## Usage
 
@@ -20,10 +33,11 @@ watch                 Poll live core voltage/clock/temp/power, tracking the max 
 clear                 Reset all tuning to stock.
 ```
 
-`status` and `watch` are read-only and need no elevation. **`undervolt` and `clear` write and must run
-from an Administrator terminal.** Changes are live-only: they revert on reboot or when Afterburner
-re-applies a profile, and don't touch saved profiles. Low-level NVAPI inspection commands are listed
-under `--help-diagnostics` and in [DEVELOPMENT.md](DEVELOPMENT.md).
+`status` and `watch` are read-only and need no elevation. **`undervolt` and `clear` write and need
+administrator rights; if run from a normal terminal they prompt for elevation.**
+`undervolt` re-applies itself at logon by default (see below), so it survives a reboot
+unless you pass `--no-persist`. Low-level NVAPI inspection commands are listed under
+`--help-diagnostics` and in [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ### undervolt options
 
@@ -46,24 +60,13 @@ Reference for the offset/pct forms (pass one; the other is read off the curve):
 Other:
   --cap-points <n>  Curve anchors holding the cap's offset, counting down from the cap (cap
                     included; default 10). 1 = only the cap point.
-  --persist         Re-apply this undervolt automatically at logon (see below).
-  --msgbox          Also show errors in a Windows message box.
-  --dry-run         Print the changes without writing.
+  --no-persist      Don't persist; by default a real run re-applies at logon (see below).
+  --save-shortcut [name]
+                    Drop a .lnk (specify name/path, otherwise auto-generated).
 ```
 
 The offset/pct forms are relative to the real under-load operating point — read it from `watch` under a
 sustained load. Each real run resets to stock first.
-
-```powershell
-# Cap 960 mV, hold 2880 MHz there:
-simple-nvidia-undervolt undervolt --mv 960 --mhz 2880
-# Same, via offsets from a watch reading of 1060 mV / 2880 MHz:
-simple-nvidia-undervolt undervolt --mv-offset -100 --mhz-offset 0 --peak-mv 1060
-# Cap 925 mV, keep stock clock there:
-simple-nvidia-undervolt undervolt --mv 925
-# Cap 960 mV and push the memory clock +1500 MHz over base:
-simple-nvidia-undervolt undervolt --mv 960 --mem-offset 1500
-```
 
 **Mechanism.** The cap anchor and every point above it are flattened to one frequency
 (`ClkVfPointsSetControl`); the boost algorithm then pins voltage at the cap. A band of `--cap-points`
@@ -74,16 +77,26 @@ writing, `undervolt` reads the curve back to confirm.
 
 ### Persisting at startup
 
-Tuning is live-only and reverts on reboot. Add `--persist` to a real `undervolt` run to make it stick:
-it copies the app to `%LOCALAPPDATA%\Programs\nvidia-simple-undervolt` and registers a Task Scheduler
-task that re-applies the same undervolt at logon, elevated. The task runs with `--msgbox`, so if it ever
-fails (idle GPU, driver change) you get a message box instead of a silent no-op.
+The `undervolt` command **persists by default**: it copies the app to
+`%LOCALAPPDATA%\Programs\nvidia-simple-undervolt` and registers a Task Scheduler task that
+re-applies the same undervolt at logon, elevated. If apply ever fails you get a message box
+so you are aware. Pass `--no-persist` to skip persistence; `unpersist` removes an existing task.
+
+### Saving a shortcut
+
+`--save-shortcut` writes a `.lnk` into the current directory, named for the settings (e.g.
+`Undervolt 960mV 2880MHz.lnk`). Double-clicking it re-applies that undervolt and shows the
+result in a message box. Pair it with `--dry-run` to save the shortcut without applying now.
+
+After a successful apply, the link for those settings in the current directory is renamed to
+`[ACTIVE] ….lnk` and the marker is cleared from the other marked links there, so the folder shows at a
+glance which profile is live. Pass `--no-shortcut-rename` to leave the files untouched.
 
 ```powershell
-# Re-apply this undervolt at every logon:
-simple-nvidia-undervolt undervolt --mv 960 --mhz 2880 --persist
-# Stop re-applying it:
-simple-nvidia-undervolt unpersist
+# Drop a reusable shortcut without applying:
+simple-nvidia-undervolt undervolt --mv 960 --mhz 2880 --dry-run --save-shortcut
+# Custom name (creates "Quiet.lnk"):
+simple-nvidia-undervolt undervolt --mv 925 --dry-run --save-shortcut Quiet
 ```
 
 ## clear
