@@ -58,7 +58,7 @@ sustained load. Each real run resets to stock first.
 # Cap 960 mV, hold 2880 MHz there:
 simple-nvidia-undervolt undervolt --mv 960 --mhz 2880
 # Same, via offsets from a watch reading of 1060 mV / 2880 MHz:
-simple-nvidia-undervolt undervolt --mv-offset -100 --mhz-offset 0 --peak-mv 1060 --peak-mhz 2880
+simple-nvidia-undervolt undervolt --mv-offset -100 --mhz-offset 0 --peak-mv 1060
 # Cap 925 mV, keep stock clock there:
 simple-nvidia-undervolt undervolt --mv 925
 # Cap 960 mV and push the memory clock +1500 MHz over base:
