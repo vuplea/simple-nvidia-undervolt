@@ -49,6 +49,16 @@ public class UndervoltRequestTests
     }
 
     [Theory]
+    [InlineData("NaN")]
+    [InlineData("Infinity")]
+    [InlineData("-Infinity")]
+    public void NonFiniteValue_Throws(string value)
+    {
+        // double.TryParse accepts these, but a non-finite tuning value is meaningless - reject it at parse.
+        Assert.Throws<NvApiException>(() => Parse("undervolt", "--mv", value));
+    }
+
+    [Theory]
     [InlineData("--no-persit")]   // a misspelled --no-persist must not be silently ignored
     [InlineData("--mvv")]
     [InlineData("--peak")]

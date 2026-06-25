@@ -42,13 +42,14 @@ internal sealed class InteractiveOutput
     /// a bare <c>--interactive</c> → Always.</summary>
     public static InteractiveMode ParseMode(string[] args)
     {
-        int i = Array.IndexOf(args, "--interactive");
-        if (i < 0)
+        if (!args.Contains("--interactive"))
         {
             return InteractiveMode.Off;
         }
 
-        return i + 1 < args.Length && args[i + 1] == "errors" ? InteractiveMode.ErrorsOnly : InteractiveMode.Always;
+        return Args.ValueAfter(args, "--interactive") == "errors"
+            ? InteractiveMode.ErrorsOnly
+            : InteractiveMode.Always;
     }
 
     /// <summary>Starts capturing the console, or returns null when the mode is Off.</summary>

@@ -19,11 +19,21 @@ internal static class Cli
             return 0;
         }
 
-        string command = args.FirstOrDefault(a => !a.StartsWith('-')) ?? "status";
+        // The command is the first token; everything after it is flags and their values. A leading flag
+        // means the command word was omitted (e.g. `--mv 960` without `undervolt`), so report that
+        // rather than mistaking the first value for an unknown command.
+        if (args[0].StartsWith('-'))
+        {
+            ErrorReporter.Report("No command given. Did you forget 'undervolt'? "
+                                 + "Run 'simple-nvidia-undervolt --help' for usage.");
+            return 2;
+        }
+
+        string command = args[0];
 
         // A relay child (spawned by auto-elevation) writes its console output back to the non-elevated
         // parent through this pipe; a top-level --interactive run tees its output into a message box.
-        string? pipeName = ArgValue(args, "--pipe-name");
+        string? pipeName = Args.ValueAfter(args, "--pipe-name");
         bool isRelayChild = pipeName is not null;
         IDisposable? childRedirect = isRelayChild ? ElevationRelay.RedirectToParent(pipeName!) : null;
         InteractiveOutput? interactive =
@@ -60,19 +70,13 @@ internal static class Cli
                 return 2;
             }
 
-            // Saving the shortcut needs neither the GPU nor elevation, and belongs in the original
-            // (non-elevated) working directory - so do it here, before any hand-off to an elevated child.
-            if (request.SaveShortcut && !isRelayChild)
+            // A dry run saves the shortcut here, before any GPU work: the .lnk only bakes the command
+            // line, so it can be written even on an idle GPU, and it belongs in the original
+            // (non-elevated) working directory. A real run defers the save until the apply succeeds (in
+            // RunUndervolt), so a failed apply leaves no shortcut behind.
+            if (request.SaveShortcut && request.DryRun && SaveShortcutOrReport(args, request) != 0)
             {
-                try
-                {
-                    Console.WriteLine(Shortcut.SaveUndervolt(args, request));
-                }
-                catch (NvApiException ex)
-                {
-                    ErrorReporter.Report($"Could not save the shortcut: {ex.Message}");
-                    return 1;
-                }
+                return 1;
             }
         }
 
@@ -144,17 +148,20 @@ internal static class Cli
         }
     }
 
-    private static string? ArgValue(string[] args, string flag)
+    /// <summary>Writes the saved shortcut and prints the result line, or reports the failure. Returns 0
+    /// on success and 1 on failure, for the caller to use as the command's exit code.</summary>
+    private static int SaveShortcutOrReport(string[] args, UndervoltRequest request)
     {
-        for (int i = 0; i < args.Length - 1; i++)
+        try
         {
-            if (args[i] == flag)
-            {
-                return args[i + 1];
-            }
+            Console.WriteLine(Shortcut.SaveUndervolt(args, request));
+            return 0;
         }
-
-        return null;
+        catch (NvApiException ex)
+        {
+            ErrorReporter.Report($"Could not save the shortcut: {ex.Message}");
+            return 1;
+        }
     }
 
     private static int UnknownCommand(string command)
@@ -284,6 +291,13 @@ internal static class Cli
         catch (NvApiException ex)
         {
             ErrorReporter.Report($"Undervolt failed: {ex.Message}");
+            return 1;
+        }
+
+        // Save the shortcut only now the apply has succeeded, so a failed apply leaves no shortcut
+        // behind. (A dry run already saved it before touching the GPU - see Dispatch.)
+        if (!request.DryRun && request.SaveShortcut && SaveShortcutOrReport(args, request) != 0)
+        {
             return 1;
         }
 
@@ -514,31 +528,20 @@ internal sealed class UndervoltRequest
             CapPoints = Number(args, "--cap-points") is { } cp ? (int)Math.Round(cp) : DefaultCapPoints,
             Persist = !args.Contains("--no-persist"),
             SaveShortcut = args.Contains("--save-shortcut"),
-            ShortcutNameOverride = OptionalValue(args, "--save-shortcut") ?? OptionalValue(args, "--shortcut-name"),
+            ShortcutNameOverride = Args.OptionalValueAfter(args, "--save-shortcut")
+                                   ?? Args.OptionalValueAfter(args, "--shortcut-name"),
             RenameShortcut = !args.Contains("--no-shortcut-rename"),
             DryRun = args.Contains("--dry-run"),
         };
 
-        int voltageForms = Count(request.Mv, request.MvOffset, request.MvPct);
-        if (voltageForms == 0)
+        if (Count(request.Mv, request.MvOffset, request.MvPct) == 0)
         {
             throw new NvApiException("undervolt needs a voltage cap: one of --mv, --mv-offset, --mv-pct.");
         }
 
-        if (voltageForms > 1)
-        {
-            throw new NvApiException("Specify only one of --mv, --mv-offset, --mv-pct.");
-        }
-
-        if (Count(request.Mhz, request.MhzOffset, request.MhzPct) > 1)
-        {
-            throw new NvApiException("Specify only one of --mhz, --mhz-offset, --mhz-pct.");
-        }
-
-        if (Count(request.Mem, request.MemOffset, request.MemPct) > 1)
-        {
-            throw new NvApiException("Specify only one of --mem, --mem-offset, --mem-pct.");
-        }
+        RejectMultiple("--mv, --mv-offset, --mv-pct", request.Mv, request.MvOffset, request.MvPct);
+        RejectMultiple("--mhz, --mhz-offset, --mhz-pct", request.Mhz, request.MhzOffset, request.MhzPct);
+        RejectMultiple("--mem, --mem-offset, --mem-pct", request.Mem, request.MemOffset, request.MemPct);
 
         if (request.CapPoints < 1)
         {
@@ -569,6 +572,7 @@ internal sealed class UndervoltRequest
 
     private bool UsesRelativeVoltage => MvOffset is not null || MvPct is not null;
     private bool UsesRelativeFrequency => MhzOffset is not null || MhzPct is not null;
+    private bool UsesFrequency => Mhz is not null || MhzOffset is not null || MhzPct is not null;
 
     public bool UsesMemory => Mem is not null || MemOffset is not null || MemPct is not null;
 
@@ -577,9 +581,7 @@ internal sealed class UndervoltRequest
     /// Only call when <see cref="UsesMemory"/> is true.</summary>
     public (int TargetMhz, int DeltaKhz) ResolveMemory(int baseMemMhz)
     {
-        double target = Mem
-            ?? (MemOffset is { } offset ? baseMemMhz + offset : baseMemMhz * (1 + MemPct!.Value / 100));
-        int targetMhz = (int)Math.Round(target);
+        int targetMhz = (int)Math.Round(ResolveForm(Mem, MemOffset, MemPct, baseMemMhz));
         if (targetMhz < baseMemMhz / 2 || targetMhz > baseMemMhz * 2)
         {
             throw new NvApiException(
@@ -608,9 +610,7 @@ internal sealed class UndervoltRequest
             peakMhz ??= GpuTuning.FreqAtVoltage(stock, peakMv!.Value);
         }
 
-        double mv = Mv
-                    ?? (MvOffset is { } offset ? peakMv!.Value + offset : peakMv!.Value * (1 + MvPct!.Value / 100));
-        int targetMv = (int)Math.Round(mv);
+        int targetMv = (int)Math.Round(ResolveForm(Mv, MvOffset, MvPct, peakMv));
         if (targetMv is < 400 or > 1200)
         {
             throw new NvApiException($"Resolved max voltage {targetMv} mV is outside the plausible 400-1200 mV range.");
@@ -621,22 +621,11 @@ internal sealed class UndervoltRequest
             throw new NvApiException($"Resolved cap voltage {targetMv} mV is above the peak {(int)pk} mV - that is not a cap.");
         }
 
-        int? targetMhz = null;
-        if (Mhz is { } rawF)
-        {
-            targetMhz = (int)Math.Round(rawF);
-        }
-        else if (MhzOffset is { } offsetF)
-        {
-            targetMhz = (int)Math.Round(peakMhz!.Value + offsetF);
-        }
-        else if (MhzPct is { } pctF)
-        {
-            targetMhz = (int)Math.Round(peakMhz!.Value * (1 + pctF / 100));
-        }
+        int? targetMhz = UsesFrequency
+            ? (int)Math.Round(ResolveForm(Mhz, MhzOffset, MhzPct, peakMhz))
+            : null;
 
-        // Range-check the resolved clock like the voltage/memory targets above (a NaN/Infinity from the
-        // parser collapses to 0/int.MinValue here, so this rejects those too).
+        // Range-check the resolved clock like the voltage/memory targets above.
         if (targetMhz is { } tMhz && tMhz is < 200 or > 4000)
         {
             throw new NvApiException(
@@ -648,37 +637,39 @@ internal sealed class UndervoltRequest
 
     private static int Count(params double?[] values) => values.Count(v => v is not null);
 
-    /// <summary>The token following <paramref name="flag"/> when it is present and not itself another
-    /// flag (i.e. an optional value), else null.</summary>
-    private static string? OptionalValue(string[] args, string flag)
+    /// <summary>Throws when more than one of the mutually exclusive <paramref name="values"/> is given,
+    /// naming the <paramref name="forms"/> in the message.</summary>
+    private static void RejectMultiple(string forms, params double?[] values)
     {
-        int i = Array.IndexOf(args, flag);
-        if (i < 0 || i + 1 >= args.Length || args[i + 1].StartsWith('-'))
+        if (Count(values) > 1)
+        {
+            throw new NvApiException($"Specify only one of {forms}.");
+        }
+    }
+
+    /// <summary>Resolves one of the absolute/offset/percentage forms against a reference: the raw value if
+    /// given, else the offset added to (or the percentage taken of) <paramref name="reference"/>. Only the
+    /// relative forms read the reference, so an absolute value resolves even when it is null.</summary>
+    private static double ResolveForm(double? absolute, double? offset, double? pct, double? reference)
+        => absolute ?? (offset is { } o ? reference!.Value + o : reference!.Value * (1 + pct!.Value / 100));
+
+    private static double? Number(string[] args, string flag)
+    {
+        if (Args.ValueAfter(args, flag) is not { } raw)
         {
             return null;
         }
 
-        return args[i + 1];
-    }
-
-    private static double? Number(string[] args, string flag)
-    {
-        for (int i = 0; i < args.Length - 1; i++)
+        // Parse invariantly: a value like "2.5" must mean two-and-a-half on every locale, not 25 as a
+        // comma-decimal culture (ro-RO/de-DE) would read it - a tuning command can't depend on the
+        // machine's regional settings. Reject non-finite values (NaN/Infinity) here so no downstream
+        // range check has to reason about what they truncate to.
+        if (!double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out double value)
+            || !double.IsFinite(value))
         {
-            if (args[i] == flag)
-            {
-                // Parse invariantly: a value like "2.5" must mean two-and-a-half on every locale, not 25
-                // as a comma-decimal culture (ro-RO/de-DE) would read it - a tuning command can't depend
-                // on the machine's regional settings.
-                if (!double.TryParse(args[i + 1], NumberStyles.Float, CultureInfo.InvariantCulture, out double value))
-                {
-                    throw new NvApiException($"{flag} requires a numeric value.");
-                }
-
-                return value;
-            }
+            throw new NvApiException($"{flag} requires a numeric value.");
         }
 
-        return null;
+        return value;
     }
 }
