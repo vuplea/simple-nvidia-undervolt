@@ -335,6 +335,7 @@ internal static class NvApi
             requestMaskWords: 4);
 
         var points = new List<(int Mv, int Mhz)>();
+        int lastVoltUv = 0;
         for (int e = StatusEntryBase; e + StatusEntryStride <= bytes.Length; e += StatusEntryStride)
         {
             int freq = BitConverter.ToInt32(bytes, e + StatusFreqOffset);
@@ -344,11 +345,14 @@ internal static class NvApi
                 break; // past the populated entries (trailing zeros / wrap sentinel)
             }
 
-            if (points.Count > 0 && volt <= points[^1].Mv * 1000)
+            // Compare raw microvolts, not the truncated mV: a sub-mV decrease still marks the end of the
+            // real array, and truncating first would let such an entry slip through.
+            if (points.Count > 0 && volt <= lastVoltUv)
             {
                 break; // no longer ascending - end of the real array
             }
 
+            lastVoltUv = volt;
             points.Add((volt / 1000, Math.Max(0, freq) / 1000));
         }
 

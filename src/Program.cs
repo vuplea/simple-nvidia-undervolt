@@ -46,12 +46,6 @@ internal static class Cli
     {
         string lower = command.ToLowerInvariant();
 
-        // Disabling persistence is just task/file cleanup - no GPU or driver needed.
-        if (lower == "unpersist")
-        {
-            return RunUnpersist();
-        }
-
         UndervoltRequest? request = null;
         if (lower == "undervolt")
         {
@@ -81,13 +75,21 @@ internal static class Cli
             }
         }
 
-        // The write commands need administrator rights (a dry run writes nothing). When not already
-        // elevated, relaunch elevated and relay that instance's output back here - unless --no-elevate,
-        // which runs in place (the driver write then likely fails, with a warning).
-        bool needsElevation = lower == "clear" || (lower == "undervolt" && !request!.DryRun);
+        // The write commands need administrator rights, as does removing the logon task ('unpersist');
+        // a dry run writes nothing. When not already elevated, relaunch elevated and relay that
+        // instance's output back here - unless --no-elevate, which runs in place (the privileged action
+        // then likely fails, with a warning where one applies).
+        bool needsElevation = lower is "clear" or "unpersist" || (lower == "undervolt" && !request!.DryRun);
         if (needsElevation && !isRelayChild && !args.Contains("--no-elevate") && !Elevation.IsElevated())
         {
             return ElevationRelay.Elevate(args);
+        }
+
+        // Disabling persistence is task/file cleanup (no GPU or driver needed); it sits after the
+        // elevation gate because removing an elevated logon task can itself require admin.
+        if (lower == "unpersist")
+        {
+            return RunUnpersist();
         }
 
         try
@@ -191,7 +193,19 @@ internal static class Cli
                           + "(core V/F curve, memory offset and voltage boost).");
         WarnIfNotElevated();
 
-        GpuTuning.Clear(gpu);
+        try
+        {
+            foreach (string line in GpuTuning.Clear(gpu))
+            {
+                Console.WriteLine($"  {line}");
+            }
+        }
+        catch (NvApiException ex)
+        {
+            ErrorReporter.Report($"Clear failed: {ex.Message}");
+            return 1;
+        }
+
         return 0;
     }
 
@@ -238,20 +252,12 @@ internal static class Cli
 
         try
         {
-            // Reset to stock first (silently) so offset/percentage forms and the missing peak coordinate
-            // resolve against the factory curve, and the cap is applied from a clean baseline.
-            if (!request.DryRun)
-            {
-                GpuTuning.Clear(gpu);
-            }
-
+            // Read and validate the curve before writing anything. The tuning-buffer byte offsets are
+            // hardware-specific (verified only on RTX 5090 / Blackwell); on a card they don't fit, the
+            // status buffer decodes as garbage, so writing would land in the wrong fields. The voltage
+            // axis stays valid on a supported card even at idle, so this rejects only genuinely
+            // unrecognized cards - and running it before the reset leaves such a card untouched.
             IReadOnlyList<(int Mv, int Mhz)> stock = GpuTuning.StockCurve(gpu);
-
-            // Refuse to write on a GPU whose curve doesn't read back as a recognized NVIDIA table.
-            // The tuning-buffer byte offsets are hardware-specific (verified only on RTX 5090 /
-            // Blackwell); on a card they don't fit, the status buffer decodes as garbage, so writing
-            // the memory or curve deltas would land in the wrong fields. The voltage axis stays valid
-            // on a supported card even at idle, so this rejects only genuinely unrecognized cards.
             if (!request.DryRun && !GpuTuning.CurveVoltsPlausible(stock))
             {
                 throw new NvApiException(
@@ -264,23 +270,26 @@ internal static class Cli
             Console.WriteLine($"  Voltage cap: {capMv} mV");
             Console.WriteLine(targetMhz is { } f ? $"  Frequency: {f} MHz" : "  Frequency: stock clock");
 
-            // Set memory before the curve: writing the memory clock goes through SetPstates20, which
-            // makes the driver re-derive the perf table and clears the V/F-curve deltas. Applying the
-            // curve last keeps it from being wiped by the memory write.
+            int? memoryDeltaKhz = null;
             if (request.UsesMemory)
             {
                 int baseMemMhz = GpuTuning.BaseMemoryClockMhz(gpu);
-                var (memMhz, memDeltaKhz) = request.ResolveMemory(baseMemMhz);
-                Console.WriteLine(memDeltaKhz == 0
+                var (memMhz, memDelta) = request.ResolveMemory(baseMemMhz);
+                memoryDeltaKhz = memDelta;
+                Console.WriteLine(memDelta == 0
                     ? $"  Memory: {memMhz} MHz (stock)"
-                    : $"  Memory: {memMhz} MHz ({memDeltaKhz / 1000:+0;-0} from {baseMemMhz} base)");
-                if (!request.DryRun)
-                {
-                    GpuTuning.SetMemoryClockOffsetKhz(gpu, memDeltaKhz);
-                }
+                    : $"  Memory: {memMhz} MHz ({memDelta / 1000:+0;-0} from {baseMemMhz} base)");
             }
 
-            foreach (string line in GpuTuning.Undervolt(gpu, stock, capMv, targetMhz, request.CapPoints, request.DryRun))
+            // Build the plan before any write: it needs a readable (3D-clocked) curve, so an idle GPU
+            // fails here - before the reset/memory/curve writes - instead of after a partial apply. A
+            // real run resets to stock then writes memory-then-curve inside Apply (the order the driver
+            // requires); a dry run only describes the change.
+            GpuTuning.CurvePlan plan = GpuTuning.BuildCurvePlan(stock, capMv, targetMhz, request.CapPoints);
+            IReadOnlyList<string> log = request.DryRun
+                ? GpuTuning.DescribePlan(plan, targetMhz)
+                : GpuTuning.Apply(gpu, plan, targetMhz, memoryDeltaKhz);
+            foreach (string line in log)
             {
                 Console.WriteLine($"  {line}");
             }
@@ -388,9 +397,9 @@ internal static class Cli
               -h, --help              Show this help.
 
             Notes:
-              * 'undervolt' and 'clear' write to the driver and need administrator rights; if run from a
-                normal terminal they prompt for elevation. 'status', 'watch' and the diagnostics are
-                read-only and never elevate.
+              * 'undervolt' and 'clear' write to the driver and 'unpersist' edits the logon task; these
+                need administrator rights and prompt for elevation if run from a normal terminal.
+                'status', 'watch' and the diagnostics are read-only and never elevate.
               * After applying, 'undervolt' reads the effective curve back and reports whether the
                 clock at the cap was reached or smoothed/limited by the driver.
               * A real 'undervolt' persists by default: it re-applies at logon, so it survives a reboot
@@ -612,6 +621,14 @@ internal sealed class UndervoltRequest
         else if (MhzPct is { } pctF)
         {
             targetMhz = (int)Math.Round(peakMhz!.Value * (1 + pctF / 100));
+        }
+
+        // Range-check the resolved clock like the voltage/memory targets above (a NaN/Infinity from the
+        // parser collapses to 0/int.MinValue here, so this rejects those too).
+        if (targetMhz is { } tMhz && tMhz is < 200 or > 4000)
+        {
+            throw new NvApiException(
+                $"Resolved core clock {tMhz} MHz is outside the plausible 200-4000 MHz range.");
         }
 
         return (targetMv, targetMhz);

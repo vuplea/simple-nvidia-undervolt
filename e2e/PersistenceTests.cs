@@ -34,6 +34,8 @@ public sealed class PersistenceTests
             // Register by running the real exe (persistence is the default for a real undervolt). This
             // also copies the app into installDir, overwriting it - hence the backup above.
             var (exitCode, output) = App.Run(null, "undervolt", "--mv", "925", "--no-shortcut-rename");
+            Skip.If(output.Contains("the GPU is idle"),
+                "the GPU is idle, so the undervolt was rejected before persisting - run a 3D load and retry.");
             Assert.Equal(0, exitCode);
             Assert.Contains("Registered logon task", output);
             Assert.True(TaskExists(task));

@@ -28,7 +28,7 @@ internal static class Persistence
         // Run at logon (not at boot): the task then lives in the user's interactive session, so it can
         // reach the GPU and an --interactive error box is actually on screen. /RL HIGHEST runs it
         // elevated, which the driver writes need.
-        string taskRun = $"\"{targetExe}\" {string.Join(' ', StartupArgs(undervoltArgs))}";
+        string taskRun = $"\"{targetExe}\" {CommandLine.Join(StartupArgs(undervoltArgs))}";
         RunSchtasks("/Create", "/F", "/TN", TaskName, "/SC", "ONLOGON", "/RL", "HIGHEST", "/TR", taskRun);
         log.Add($"Registered logon task '{TaskName}'.");
         log.Add($"Runs: {taskRun}");

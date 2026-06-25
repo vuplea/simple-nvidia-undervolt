@@ -172,6 +172,16 @@ public class UndervoltRequestTests
         Assert.Throws<NvApiException>(() => Parse("undervolt", "--mv", mv).Resolve(TestCurves.Realistic()));
     }
 
+    [Theory]
+    [InlineData("100")]     // below the plausible floor
+    [InlineData("28800")]   // a 10x typo, above the ceiling
+    [InlineData("NaN")]     // parses as a double but resolves to a nonsense clock
+    public void ImplausibleFrequency_Throws(string mhz)
+    {
+        Assert.Throws<NvApiException>(
+            () => Parse("undervolt", "--mv", "960", "--mhz", mhz).Resolve(TestCurves.Realistic()));
+    }
+
     // --- Memory clock ---
 
     [Fact]

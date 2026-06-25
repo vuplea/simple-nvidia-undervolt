@@ -34,6 +34,8 @@ public sealed class CliTests
 
         var (exitCode, output) = App.Run(null, "undervolt", "--mv", "925", "--dry-run", "--no-persist", "--no-shortcut-rename");
 
+        Skip.If(output.Contains("the GPU is idle"),
+            "the GPU is idle, so the curve plan can't be computed - run a 3D load and retry.");
         Assert.Equal(0, exitCode);
         Assert.Contains("[dry run]", output);
         Assert.Equal(before, CurveDeltasKhz()); // nothing was written
@@ -58,10 +60,12 @@ public sealed class CliTests
 
         int baseMhz = GpuTuning.BaseMemoryClockMhz(_gpu.Gpu);
 
-        // The memory write goes in before the curve, so it lands even at idle (when the curve is skipped).
-        var (exitCode, _) = App.Run(null,
+        var (exitCode, output) = App.Run(null,
             "undervolt", "--mv", "925", "--mem-offset", "100", "--no-persist", "--no-shortcut-rename");
 
+        // A real undervolt needs a readable curve, so the whole apply (memory included) is rejected at idle.
+        Skip.If(output.Contains("the GPU is idle"),
+            "the GPU is idle, so the undervolt was rejected - run a 3D load and retry.");
         Assert.Equal(0, exitCode);
         GpuTuning after = GpuTuning.Read(_gpu.Gpu);
         Assert.True(after.MemoryClockKhz.Ok, after.MemoryClockKhz.Error);
@@ -132,9 +136,11 @@ public sealed class CliTests
             Touch(temp, "[ACTIVE] Undervolt 900mV.lnk");  // stale marker -> cleared
             Touch(temp, "Some Game.lnk");                 // unrelated -> left alone
 
-            // A real apply (renames the link); the curve may be skipped at idle but marking still runs.
-            var (exitCode, _) = App.Run(temp, "undervolt", "--mv", "925", "--no-persist");
+            // Marking runs only after a verified apply, which needs a readable curve, so skip at idle.
+            var (exitCode, output) = App.Run(temp, "undervolt", "--mv", "925", "--no-persist");
 
+            Skip.If(output.Contains("the GPU is idle"),
+                "the GPU is idle, so the undervolt was rejected before marking - run a 3D load and retry.");
             Assert.Equal(0, exitCode);
             Assert.True(File.Exists(Path.Combine(temp, "[ACTIVE] Undervolt 925mV.lnk")));
             Assert.False(File.Exists(Path.Combine(temp, "Undervolt 925mV.lnk")));

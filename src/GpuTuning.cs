@@ -25,42 +25,21 @@ internal sealed class GpuTuning
         CoreVoltageBoostPercent = Reading.Try(() => NvApi.GetCoreVoltageBoostPercent(gpu)),
     };
 
-    /// <summary>Resets tuning to stock, returning a human-readable line per action taken.</summary>
+    /// <summary>Resets tuning to stock, returning a human-readable line per action. A step the driver
+    /// rejects (e.g. when not elevated) throws rather than being logged as "skipped", so a partial reset
+    /// surfaces as a failure the caller can report instead of masquerading as success.</summary>
     public static IReadOnlyList<string> Clear(IntPtr gpu)
     {
-        var log = new List<string>();
+        int cleared = ResetCoreCurve(gpu);
+        NvApi.SetPstate0Offsets(gpu, graphicsDeltaKhz: 0, memoryDeltaKhz: 0, coreVoltageDeltaUv: 0);
+        NvApi.SetCoreVoltageBoostPercent(gpu, 0);
 
-        Run(log, () =>
+        return new[]
         {
-            int cleared = ResetCoreCurve(gpu);
-            return cleared > 0 ? $"Core V/F curve: cleared {cleared} offset point(s)." : "Core V/F curve: already stock.";
-        });
-
-        Run(log, () =>
-        {
-            NvApi.SetPstate0Offsets(gpu, graphicsDeltaKhz: 0, memoryDeltaKhz: 0, coreVoltageDeltaUv: 0);
-            return "Memory & core clock offsets: reset to 0.";
-        });
-
-        Run(log, () =>
-        {
-            NvApi.SetCoreVoltageBoostPercent(gpu, 0);
-            return "Core voltage boost: reset to 0%.";
-        });
-
-        return log;
-    }
-
-    private static void Run(List<string> log, Func<string> action)
-    {
-        try
-        {
-            log.Add(action());
-        }
-        catch (NvApiException ex)
-        {
-            log.Add($"Skipped ({ex.Message}).");
-        }
+            cleared > 0 ? $"Core V/F curve: cleared {cleared} offset point(s)." : "Core V/F curve: already stock.",
+            "Memory & core clock offsets: reset to 0.",
+            "Core voltage boost: reset to 0%.",
+        };
     }
 
     // --- Undervolt / overclock ---
@@ -122,60 +101,43 @@ internal sealed class GpuTuning
     }
 
     /// <summary>
-    /// Caps the core voltage at <paramref name="capMv"/> by flattening the V/F curve at and above that
-    /// voltage (the Afterburner way: the boost algorithm picks the lowest voltage reaching the max
-    /// clock, so a flat top pins the voltage there), at <paramref name="targetMhz"/> if given else the
-    /// stock clock at the cap. A band of <paramref name="capPoints"/> anchors ending at the cap carries
-    /// the cap's offset to cushion a voltage undershoot; everything below it stays at stock. Deltas are
-    /// measured from the supplied <paramref name="stock"/> curve; on a dry run nothing is written. Callers
-    /// reset to stock first, so the curve is applied from a clean baseline. Ends with a read-back
-    /// confirmation of the effective curve.
+    /// Writes the undervolt in the order the driver requires: reset to stock, then the memory offset
+    /// (<see cref="NvApi.SetPstate0Offsets"/> re-derives the perf table and wipes curve deltas), then the
+    /// curve flatten that caps the voltage. A flat top makes the boost algorithm hold the voltage at the
+    /// cap; the band built into <paramref name="plan"/> cushions a voltage undershoot. Ends by reading the
+    /// effective curve back to confirm. Any step the driver rejects throws — so the caller persists and
+    /// reports "done" only on a real, applied undervolt. The caller builds <paramref name="plan"/> first
+    /// (which requires a readable curve), so an idle or unrecognized curve fails before anything is written.
     /// </summary>
-    public static IReadOnlyList<string> Undervolt(IntPtr gpu, IReadOnlyList<(int Mv, int Mhz)> stock,
-        int capMv, int? targetMhz, int capPoints, bool dryRun)
+    public static IReadOnlyList<string> Apply(IntPtr gpu, CurvePlan plan, int? targetMhz, int? memoryDeltaKhz)
     {
-        var log = new List<string>();
+        Clear(gpu); // reset to a clean stock baseline; an apply doesn't surface the reset's own log
 
-        CurvePlan plan;
-        try
+        if (memoryDeltaKhz is { } delta)
         {
-            plan = BuildCurvePlan(stock, capMv, targetMhz, capPoints);
-        }
-        catch (NvApiException ex)
-        {
-            log.Add($"Core V/F curve: unavailable ({ex.Message}).");
-            return log;
+            SetMemoryClockOffsetKhz(gpu, delta);
         }
 
-        if (dryRun)
+        NvApi.SetCurveFreqDeltasKhz(gpu, plan.DeltasKhz);
+        return Confirm(gpu, targetMhz);
+    }
+
+    /// <summary>Describes the change <see cref="Apply"/> would make, for <c>--dry-run</c> — writes nothing.</summary>
+    public static IReadOnlyList<string> DescribePlan(CurvePlan plan, int? targetMhz)
+    {
+        string action = $"cap at {plan.CapMv} mV / {plan.CapMhz} MHz" + (targetMhz is null ? " (stock)" : string.Empty);
+        var log = new List<string> { $"[dry run] Would {action}; {plan.Changes.Count} point(s) change:" };
+        foreach (CurveChange c in plan.Changes)
         {
-            string action = $"cap at {plan.CapMv} mV / {plan.CapMhz} MHz" + (targetMhz is null ? " (stock)" : string.Empty);
-            log.Add($"[dry run] Would {action}; {plan.Changes.Count} point(s) change:");
-            foreach (CurveChange c in plan.Changes)
-            {
-                log.Add($"[dry run]   {c.Mv,4} mV: {c.OldMhz} -> {c.NewMhz} MHz "
-                        + $"(delta {c.NewDeltaKhz / 1000.0:+0;-0} MHz)");
-            }
-
-            if (plan.Changes.Count == 0)
-            {
-                log.Add("[dry run]   curve already matches; nothing to write.");
-            }
-
-            return log;
+            log.Add($"[dry run]   {c.Mv,4} mV: {c.OldMhz} -> {c.NewMhz} MHz "
+                    + $"(delta {c.NewDeltaKhz / 1000.0:+0;-0} MHz)");
         }
 
-        try
+        if (plan.Changes.Count == 0)
         {
-            NvApi.SetCurveFreqDeltasKhz(gpu, plan.DeltasKhz);
-        }
-        catch (NvApiException ex)
-        {
-            log.Add($"Core V/F curve: not applied ({ex.Message}).");
-            return log;
+            log.Add("[dry run]   curve already matches; nothing to write.");
         }
 
-        log.AddRange(Confirm(gpu, targetMhz));
         return log;
     }
 

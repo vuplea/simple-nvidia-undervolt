@@ -33,7 +33,7 @@ watch                 Poll live core voltage/clock/temp/power, tracking the max 
 clear                 Reset all tuning to stock.
 ```
 
-`status` and `watch` are read-only and need no elevation. **`undervolt` and `clear` write and need
+`status` and `watch` are read-only and need no elevation. **`undervolt`, `clear` and `unpersist` need
 administrator rights; if run from a normal terminal they prompt for elevation.**
 `undervolt` re-applies itself at logon by default (see below), so it survives a reboot
 unless you pass `--no-persist`. Low-level NVAPI inspection commands are listed under
