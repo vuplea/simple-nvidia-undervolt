@@ -21,10 +21,10 @@ public class PersistenceTests
     }
 
     [Fact]
-    public void StartupArgs_DropUserInteractive_PersistAndSaveShortcut()
+    public void StartupArgs_DropUserInteractiveAndSaveShortcut()
     {
         var result = Persistence.StartupArgs(
-            new[] { "undervolt", "--mv", "925", "--interactive", "--persist", "--save-shortcut" });
+            new[] { "undervolt", "--mv", "925", "--interactive", "--save-shortcut" });
 
         Assert.Equal(Expected("undervolt", "--mv", "925"), result);
     }

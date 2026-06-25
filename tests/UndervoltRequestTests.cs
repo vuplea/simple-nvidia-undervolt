@@ -48,6 +48,43 @@ public class UndervoltRequestTests
         Assert.Throws<NvApiException>(() => Parse("undervolt", "--mv", "lots"));
     }
 
+    [Theory]
+    [InlineData("--no-persit")]   // a misspelled --no-persist must not be silently ignored
+    [InlineData("--mvv")]
+    [InlineData("--peak")]
+    public void UnknownFlag_Throws(string flag)
+    {
+        Assert.Throws<NvApiException>(() => Parse("undervolt", "--mv", "960", flag));
+    }
+
+    [Fact]
+    public void KnownFlagsAndNegativeValues_AreAccepted()
+    {
+        // Negative numeric values start with a single dash, so they must not read as unknown flags.
+        var request = Parse("undervolt", "--mv-offset", "-100", "--mhz-offset", "-50", "--peak-mv", "1060",
+            "--cap-points", "8", "--no-persist", "--no-shortcut-rename", "--dry-run");
+        Assert.Equal(-100, request.MvOffset);
+        Assert.Equal(-50, request.MhzOffset);
+    }
+
+    [Fact]
+    public void DecimalValue_ParsesInvariantly_RegardlessOfCulture()
+    {
+        var original = System.Threading.Thread.CurrentThread.CurrentCulture;
+        try
+        {
+            // A comma-decimal locale must not turn "2.5" into 25 (which would 10x the change).
+            System.Threading.Thread.CurrentThread.CurrentCulture = new System.Globalization.CultureInfo("de-DE");
+            var (_, targetMhz) = Parse("undervolt", "--mv", "960", "--mhz-pct", "2.5", "--peak-mhz", "1000")
+                .Resolve(TestCurves.Realistic());
+            Assert.Equal(1025, targetMhz); // 1000 * 1.025, not 1000 * 1.25
+        }
+        finally
+        {
+            System.Threading.Thread.CurrentThread.CurrentCulture = original;
+        }
+    }
+
     [Fact]
     public void CapPoints_DefaultsToTen()
     {

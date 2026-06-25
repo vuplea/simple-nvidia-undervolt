@@ -13,6 +13,39 @@ internal static class CommandLine
 {
     public static string Join(IEnumerable<string> args) => string.Join(' ', args.Select(Quote));
 
+    /// <summary>Drops the given flags (and the values that follow them) from an argument list, returning
+    /// a mutable list the caller appends its own canonical flags to. A <paramref name="bare"/> flag drops
+    /// just itself; a <paramref name="withValue"/> flag also drops the next token (a mandatory value); a
+    /// <paramref name="withOptionalValue"/> flag drops the next token only when it isn't itself a flag.
+    /// Both the elevated-logon and the saved-shortcut commands re-derive their command line this way:
+    /// strip the flags that don't belong on the re-run, then add the fixed set that does.</summary>
+    public static List<string> StripFlags(string[] args, string[] bare, string[] withValue,
+        string[] withOptionalValue)
+    {
+        var kept = new List<string>();
+        for (int i = 0; i < args.Length; i++)
+        {
+            string arg = args[i];
+            if (withValue.Contains(arg))
+            {
+                i++; // drop the flag and its mandatory value
+            }
+            else if (withOptionalValue.Contains(arg))
+            {
+                if (i + 1 < args.Length && !args[i + 1].StartsWith('-'))
+                {
+                    i++; // drop the optional value too
+                }
+            }
+            else if (!bare.Contains(arg))
+            {
+                kept.Add(arg);
+            }
+        }
+
+        return kept;
+    }
+
     /// <summary>Quotes one argument per the <c>CommandLineToArgvW</c> rules: a token with no whitespace
     /// or quote is returned unchanged; otherwise it is wrapped in quotes with backslashes that precede a
     /// quote (or the closing quote) doubled, and embedded quotes escaped as <c>\"</c>. Escaping only the

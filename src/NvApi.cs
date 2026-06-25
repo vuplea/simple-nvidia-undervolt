@@ -143,15 +143,24 @@ internal static class NvApi
         return name.ToString();
     }
 
+    /// <summary>The GPU's full name, or <c>&lt;unknown&gt;</c> if the driver won't report it — for the
+    /// human-facing headers that shouldn't fail a command just because the name read did.</summary>
+    public static string SafeFullName(IntPtr gpu)
+    {
+        try
+        {
+            return GetFullName(gpu);
+        }
+        catch (NvApiException)
+        {
+            return "<unknown>";
+        }
+    }
+
     // --- Generic versioned-struct get/set ---
 
-    /// <param name="requestMaskWords">
-    /// Number of 32-bit mask words (immediately after the version) to set to all-ones before the
-    /// call. The V/F-points GET functions use this leading mask to select which points to return;
-    /// a zero mask returns no data. Pass 0 for structs without a request mask.
-    /// </param>
     private static T GetStruct<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.All)] T>(
-        IntPtr gpu, uint functionId, int versionNumber, string action, int requestMaskWords = 0)
+        IntPtr gpu, uint functionId, int versionNumber, string action)
         where T : struct
     {
         int size = Marshal.SizeOf<T>();
@@ -160,7 +169,6 @@ internal static class NvApi
         {
             Marshal.Copy(new byte[size], 0, buffer, size); // zero-fill
             Marshal.WriteInt32(buffer, MakeVersion(size, versionNumber));
-            SetRequestMask(buffer, requestMaskWords);
             Check(GetDelegate<GpuStructDelegate>(functionId)(gpu, buffer), action);
             return Marshal.PtrToStructure<T>(buffer);
         }
@@ -313,7 +321,7 @@ internal static class NvApi
     // Afterburner curve; the typed-struct layout the SDK headers imply does not match the driver, so
     // these are handled as raw bytes. The status buffer reports the *effective* curve (it reflects an
     // applied offset); the control buffer holds only the editable freq deltas (0 at stock).
-    public const int CONTROL_TABLE_SIZE = 9248; // ClkVfPointsGetControl / SetControl, version 1
+    private const int CONTROL_TABLE_SIZE = 9248; // ClkVfPointsGetControl / SetControl, version 1
     private const int CtrlEntryBase = 0x64;
     private const int CtrlEntryStride = 36;
     private const int CtrlDeltaOffset = 0x18; // signed kHz frequency delta within an entry
@@ -454,7 +462,7 @@ internal static class NvApi
         {
             ("pstates20", ID_GPU_GetPstates20, 1, Marshal.SizeOf<Pstates20InfoV1>(), 0),
             ("curveControl", ID_GPU_GetClockBoostTable, 1, CONTROL_TABLE_SIZE, 4),
-            ("curveStatusV1", ID_GPU_GetVfCurveStatus, 1, 7208, 4), // legacy curve view (tops out ~945 mV)
+            ("curveStatusV1", ID_GPU_GetVfCurveStatus, 1, StatusCurveSize, 4), // same buffer GetVfCurve decodes
             ("voltageLock", ID_GPU_GetClockBoostLock, 2, 780, 0),
             ("clkDomainsInfo", 0x64B43A6A, 1, 2344, 0),
             ("clkVfPointsInfo", 0x507B4B59, 1, 6188, 4),
@@ -479,9 +487,13 @@ internal static class NvApi
     /// <summary>Calls a GET with a given (version, claimed size) and returns the raw NVAPI status
     /// without throwing — used to discover which struct size/version the driver accepts. The buffer
     /// is over-allocated so an accepted-but-larger struct cannot overflow into the heap.</summary>
+    /// <summary>Over-allocation for raw reads whose real struct size is unknown (probe / extent): large
+    /// enough to contain anything the driver writes, so an oversized struct can't corrupt the heap.</summary>
+    public const int ProbeAllocSize = 262144;
+
     public static int ProbeStructVersion(IntPtr gpu, uint functionId, int versionNumber, int claimedSize)
     {
-        const int allocSize = 262144;
+        const int allocSize = ProbeAllocSize;
         IntPtr buffer = Marshal.AllocHGlobal(allocSize);
         try
         {

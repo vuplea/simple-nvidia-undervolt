@@ -18,7 +18,7 @@ internal sealed class GpuTuning
 
     public static GpuTuning Read(IntPtr gpu) => new()
     {
-        Name = SafeName(gpu),
+        Name = NvApi.SafeFullName(gpu),
         CoreCurveOffsetsKhz = Reading.Try(() => NonZeroCoreOffsets(gpu)),
         MemoryClockKhz = Reading.Try(() => ReadMemoryClockKhz(NvApi.GetPstates20(gpu))),
         BaseMemoryClockKhz = Reading.Try(() => (int)NvApi.GetClockFrequencyKhz(gpu, NvApi.CLOCK_FREQ_TYPE_BASE, NvApi.CLOCK_DOMAIN_MEMORY)),
@@ -441,18 +441,6 @@ internal sealed class GpuTuning
         return 0;
     }
 
-
-    private static string SafeName(IntPtr gpu)
-    {
-        try
-        {
-            return NvApi.GetFullName(gpu);
-        }
-        catch (NvApiException)
-        {
-            return "<unknown>";
-        }
-    }
 
     // --- Display ---
 

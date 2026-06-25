@@ -82,35 +82,10 @@ internal static class Persistence
     /// surfaces failures through a box (<c>--interactive errors</c>) since no console is watching.</summary>
     internal static IReadOnlyList<string> StartupArgs(string[] args)
     {
-        var kept = new List<string>();
-        for (int i = 0; i < args.Length; i++)
-        {
-            // Flags carrying a mandatory following value - drop the value too.
-            if (args[i] is "--pipe-name" or "--shortcut-name")
-            {
-                i++;
-                continue;
-            }
-
-            // Flags carrying an optional following value (a non-flag token).
-            if (args[i] is "--interactive" or "--save-shortcut")
-            {
-                if (i + 1 < args.Length && !args[i + 1].StartsWith('-'))
-                {
-                    i++;
-                }
-
-                continue;
-            }
-
-            if (args[i] is "--persist" or "--no-persist" or "--dry-run"
-                or "--no-shortcut-rename" or "--no-elevate")
-            {
-                continue;
-            }
-
-            kept.Add(args[i]);
-        }
+        List<string> kept = CommandLine.StripFlags(args,
+            bare: new[] { "--no-persist", "--dry-run", "--no-shortcut-rename", "--no-elevate" },
+            withValue: new[] { "--pipe-name", "--shortcut-name" },
+            withOptionalValue: new[] { "--interactive", "--save-shortcut" });
 
         kept.Add("--no-persist");
         kept.Add("--no-shortcut-rename");

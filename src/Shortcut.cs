@@ -126,32 +126,10 @@ internal static class Shortcut
     /// result in a box) and <c>--shortcut-name &lt;name&gt;</c> (so the click re-marks this very link active).</summary>
     internal static IReadOnlyList<string> ShortcutArgs(string[] args, string name)
     {
-        var kept = new List<string>();
-        for (int i = 0; i < args.Length; i++)
-        {
-            if (args[i] == "--dry-run")
-            {
-                continue;
-            }
-
-            if (args[i] is "--pipe-name" or "--shortcut-name")
-            {
-                i++; // drop the flag and its value
-                continue;
-            }
-
-            if (args[i] == "--save-shortcut")
-            {
-                if (i + 1 < args.Length && !args[i + 1].StartsWith('-'))
-                {
-                    i++; // drop the optional name value too
-                }
-
-                continue;
-            }
-
-            kept.Add(args[i]);
-        }
+        List<string> kept = CommandLine.StripFlags(args,
+            bare: new[] { "--dry-run" },
+            withValue: new[] { "--pipe-name", "--shortcut-name" },
+            withOptionalValue: new[] { "--save-shortcut" });
 
         kept.Add("--shortcut-name");
         kept.Add(name);

@@ -79,7 +79,7 @@ internal static class Diagnostics
     /// <summary>Prints a one-shot snapshot of the live core voltage, clock, temperature and power.</summary>
     public static int Voltage(IntPtr gpu)
     {
-        Console.WriteLine(Cli.SafeName(gpu));
+        Console.WriteLine(NvApi.SafeFullName(gpu));
         Console.WriteLine($"  {Telemetry.Sample(gpu)}");
         return 0;
     }
@@ -89,7 +89,7 @@ internal static class Diagnostics
     /// the effective ceiling, the highest voltage the boost algorithm actually authorizes.</summary>
     public static int Watch(IntPtr gpu)
     {
-        Console.WriteLine($"{Cli.SafeName(gpu)} - polling every 5s, Ctrl+C to stop");
+        Console.WriteLine($"{NvApi.SafeFullName(gpu)} - polling every 5s, Ctrl+C to stop");
 
         using var stop = new ManualResetEventSlim(false);
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; stop.Set(); };
@@ -264,8 +264,7 @@ internal static class Diagnostics
             return 2;
         }
 
-        const int allocSize = 262144;
-        byte[] bytes = NvApi.ReadRaw(gpu, functionId, version, claimedSize, allocSize, requestMaskWords: 4);
+        byte[] bytes = NvApi.ReadRaw(gpu, functionId, version, claimedSize, NvApi.ProbeAllocSize, requestMaskWords: 4);
 
         int written = 0;
         for (int i = 0; i < bytes.Length; i++)
@@ -324,15 +323,9 @@ internal readonly struct Telemetry
     public override string ToString()
         => $"{VoltageUv / 1000,4} mV  {CoreMhz,4} MHz  {TemperatureC,2} C  {PowerPercent,5:0.0}% TGP";
 
-    private static uint Safe(Func<uint> read)
+    private static T Safe<T>(Func<T> read) where T : struct
     {
         try { return read(); }
-        catch (NvApiException) { return 0; }
-    }
-
-    private static double Safe(Func<double> read)
-    {
-        try { return read(); }
-        catch (NvApiException) { return 0; }
+        catch (NvApiException) { return default; }
     }
 }

@@ -1,3 +1,4 @@
+using System.Globalization;
 using SimpleNvidiaUndervolt;
 
 return Cli.Run(args);
@@ -125,9 +126,7 @@ internal static class Cli
                 "probe" => Diagnostics.Probe(gpu, args),
                 "extent" => Diagnostics.Extent(gpu, args),
                 "curve" => Diagnostics.Curve(gpu),
-                "voltage" or "volt" => args.Contains("--watch")
-                    ? Diagnostics.Watch(gpu)
-                    : Diagnostics.Voltage(gpu),
+                "voltage" or "volt" => Diagnostics.Voltage(gpu),
                 "watch" => Diagnostics.Watch(gpu),
                 "clocks" => Diagnostics.Clocks(gpu),
                 "raw" => Diagnostics.Raw(gpu, args),
@@ -165,18 +164,6 @@ internal static class Cli
         return 2;
     }
 
-    public static string SafeName(IntPtr gpu)
-    {
-        try
-        {
-            return NvApi.GetFullName(gpu);
-        }
-        catch (NvApiException)
-        {
-            return "<unknown>";
-        }
-    }
-
     private static int RunStatus(IntPtr gpu)
     {
         var tuning = GpuTuning.Read(gpu);
@@ -189,7 +176,7 @@ internal static class Cli
 
     private static int RunClear(IntPtr gpu)
     {
-        Console.WriteLine($"Resetting {SafeName(gpu)} to stock "
+        Console.WriteLine($"Resetting {NvApi.SafeFullName(gpu)} to stock "
                           + "(core V/F curve, memory offset and voltage boost).");
         WarnIfNotElevated();
 
@@ -242,8 +229,8 @@ internal static class Cli
     private static int RunUndervolt(IntPtr gpu, string[] args, UndervoltRequest request)
     {
         Console.WriteLine(request.DryRun
-            ? $"Dry run for {SafeName(gpu)} - nothing will be written:"
-            : $"Undervolting {SafeName(gpu)}:");
+            ? $"Dry run for {NvApi.SafeFullName(gpu)} - nothing will be written:"
+            : $"Undervolting {NvApi.SafeFullName(gpu)}:");
 
         if (!request.DryRun)
         {
@@ -484,8 +471,33 @@ internal sealed class UndervoltRequest
     /// <summary>Default width of the cap band (anchors holding the cap's offset, cap included).</summary>
     public const int DefaultCapPoints = 10;
 
+    /// <summary>Every option <c>undervolt</c> accepts (including the hidden relay/saved-link flags). Used
+    /// to reject an unrecognized <c>--flag</c> instead of silently ignoring it: on a hardware-tuning tool
+    /// a typo like <c>--no-persit</c> must fail, not quietly apply and persist the wrong thing.</summary>
+    private static readonly HashSet<string> KnownFlags = new(StringComparer.Ordinal)
+    {
+        "--mv", "--mv-offset", "--mv-pct",
+        "--mhz", "--mhz-offset", "--mhz-pct",
+        "--mem", "--mem-offset", "--mem-pct",
+        "--peak-mv", "--peak-mhz",
+        "--cap-points", "--no-persist", "--save-shortcut", "--no-shortcut-rename",
+        "--no-elevate", "--dry-run", "--interactive",
+        "--pipe-name", "--shortcut-name", // hidden: baked into elevated relaunches and saved shortcuts
+    };
+
     public static UndervoltRequest Parse(string[] args)
     {
+        // A value never starts with "--" (negative numbers use a single dash), so any "--" token is a
+        // flag; reject the ones we don't know rather than ignoring them.
+        foreach (string arg in args)
+        {
+            if (arg.StartsWith("--", StringComparison.Ordinal) && !KnownFlags.Contains(arg))
+            {
+                throw new NvApiException(
+                    $"unknown option '{arg}'. Run 'simple-nvidia-undervolt --help' for the supported options.");
+            }
+        }
+
         var request = new UndervoltRequest
         {
             Mv = Number(args, "--mv"),
@@ -655,7 +667,10 @@ internal sealed class UndervoltRequest
         {
             if (args[i] == flag)
             {
-                if (!double.TryParse(args[i + 1], out double value))
+                // Parse invariantly: a value like "2.5" must mean two-and-a-half on every locale, not 25
+                // as a comma-decimal culture (ro-RO/de-DE) would read it - a tuning command can't depend
+                // on the machine's regional settings.
+                if (!double.TryParse(args[i + 1], NumberStyles.Float, CultureInfo.InvariantCulture, out double value))
                 {
                     throw new NvApiException($"{flag} requires a numeric value.");
                 }
