@@ -4,7 +4,7 @@ A small Windows command-line alternative to MSI Afterburner for undervolting an 
 the driver directly — no background process — and caps voltage by flattening the V/F curve.
 
 Undervolting an NVIDIA GPU shouldn't mean dragging points around a curve editor. **Only one segment
-matters** — the max voltage and the clock you run there — because that's where the card sits at max
+usually matters** — the max voltage and the clock you run there — because that's where the card sits at max
 load, and it impacts your peak framerate. The rest of the curve is ignored at idle and irrelevant at max
 load. To simplify, you can just set your desired voltage and frequency pair with this tool.
 
