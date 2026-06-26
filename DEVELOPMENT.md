@@ -34,6 +34,7 @@ These are hidden from the main `--help`; run `--help-diagnostics` to list them.
 
 ```
 curve                       Dump the live V/F curve.
+layout                      Auto-detect the curve buffer offsets and check them against the build.
 voltage                     Live core voltage/clock/temp/power, one-shot (continuous is 'watch').
 clocks                      Current/base/boost clocks.
 scan <value>                Find a value across the tuning buffers.
@@ -57,17 +58,27 @@ control: base 0x64  stride 36  delta +0x18   (size 9248)
 status:  base 0x40  stride 28  freq +0x08  volt +0x0C   (size 7208)
 ```
 
-Use Afterburner as a reference, in an Administrator terminal:
+These NVAPI layouts have been stable across generations, so they most likely already fit. To confirm,
+in an Administrator terminal with the GPU under a 3D load (so the curve's clocks are live):
 
-1. `clear -y`, then `snapshot`.
-2. In Afterburner's curve editor (Ctrl+F) raise one point (e.g. 950 mV) and flatten to its right; Apply.
-3. `diff` — the changed `curveControl` words reveal the stride and delta offset; `curve` should show the
-   flat segment (confirms the status offsets).
-4. From a changed control entry and the matching status entry, derive the two bases (mind the `i-1`
-   offset). Adjust the constants, rebuild.
-5. `status` should show the offset and `clear` should remove it (`curve` back to stock). If both hold,
-   the card is confirmed. Sanity-check that `curve`'s clocks line up with `clocks`; if they don't,
-   please open an issue/PR.
+1. **Read matches Afterburner.** `curve`'s voltage anchors and clocks should line up with Afterburner's
+   curve editor (Ctrl+F), and with `clocks`. If they do, the status (read) offsets are right.
+2. **A write round-trips.** `undervolt --mv <peak> --mhz <x> --no-persist` — then `curve`/`status` should
+   show the flat cap, and `clear` should put it back to stock. That exercises the control (write) offsets.
 
-Until then, treat undervolting as unverified — everything goes through these curve buffers. If you
-confirm a generation that isn't validated yet, please open an issue/PR so it can be marked supported.
+If both hold, the card is confirmed — please open an issue/PR so the generation can be marked supported.
+
+Only if step 1 *doesn't* match does the layout differ on this card; re-derive the offsets:
+
+1. **Status** — run `layout`. It scans the live status buffer for the ascending-voltage array and prints
+   the detected `base / stride / volt / freq`, flagging whether they match the build. Paste any differing
+   values into the `Status*` constants in `src/NvApi.cs`. (The voltage axis reads at idle; run under load
+   so it can also detect the freq column.)
+2. **Control** — it carries no voltage to anchor on, so derive it with a write: `snapshot`, nudge one curve
+   point in Afterburner, then `diff` (or `scan <deltaKhz>`). The changed `curveControl` words give the
+   stride (their spacing) and the delta offset; the run starts at control entry `i-1` for the lowest moved
+   status anchor `i` — skip the `i-1` and you land one stride off (reads fine, but writes hit the
+   neighbour). Set the `Ctrl*` constants to match.
+3. Rebuild and re-run the confirmation above.
+
+Until confirmed, treat undervolting as unverified — everything goes through these curve buffers.

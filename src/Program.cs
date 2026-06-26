@@ -130,6 +130,7 @@ internal static class Cli
                 "probe" => Diagnostics.Probe(gpu, args),
                 "extent" => Diagnostics.Extent(gpu, args),
                 "curve" => Diagnostics.Curve(gpu),
+                "layout" => Diagnostics.Layout(gpu),
                 "voltage" or "volt" => Diagnostics.Voltage(gpu),
                 "watch" => Diagnostics.Watch(gpu),
                 "clocks" => Diagnostics.Clocks(gpu),
@@ -178,6 +179,22 @@ internal static class Cli
         Console.WriteLine($"  Core curve offset: {tuning.DescribeCoreCurve()}");
         Console.WriteLine($"  Memory clock: {tuning.DescribeMemoryClock()}");
         Console.WriteLine($"  Core voltage boost: {tuning.DescribeVoltageBoost()}");
+
+        // Autonomously confirm the curve-buffer offsets fit this GPU; warn (don't fail) if they don't,
+        // since a mismatch means the readings above may be wrong and 'undervolt' will refuse to write.
+        try
+        {
+            if (GpuTuning.CurveLayoutMismatch(gpu) is { } mismatch)
+            {
+                Console.WriteLine($"  Warning: the V/F curve buffer doesn't match this GPU's compiled "
+                    + $"layout ({mismatch}) - readings may be wrong. Run 'layout'.");
+            }
+        }
+        catch (NvApiException)
+        {
+            // The curve buffer couldn't be read at all; the offset readings above already reflect that.
+        }
+
         return 0;
     }
 
@@ -246,18 +263,18 @@ internal static class Cli
 
         try
         {
-            // Read and validate the curve before writing anything. The tuning-buffer byte offsets are
-            // hardware-specific (verified only on RTX 5090 / Blackwell); on a card they don't fit, the
-            // status buffer decodes as garbage, so writing would land in the wrong fields. The voltage
-            // axis stays valid on a supported card even at idle, so this rejects only genuinely
-            // unrecognized cards - and running it before the reset leaves such a card untouched.
+            // Confirm the curve-buffer offsets fit this GPU before writing anything. The byte offsets are
+            // hardware-specific (verified only on RTX 5090 / Blackwell); on a card they don't fit, a write
+            // would land in the wrong fields. Independently re-detecting the layout from the raw bytes and
+            // comparing to the compiled offsets - the same check 'layout' prints - rejects an unrecognized
+            // card here, before the reset, leaving it untouched.
             IReadOnlyList<(int Mv, int Mhz)> stock = GpuTuning.StockCurve(gpu);
-            if (!request.DryRun && !GpuTuning.CurveVoltsPlausible(stock))
+            if (!request.DryRun && GpuTuning.CurveLayoutMismatch(gpu) is { } mismatch)
             {
                 throw new NvApiException(
-                    "the V/F curve didn't read as a recognized NVIDIA table on this GPU, so the "
-                    + "tuning-buffer offsets likely don't match this hardware - refusing to write. "
-                    + "See DEVELOPMENT.md (Confirming another card).");
+                    "the V/F curve buffer doesn't match this GPU's layout, so the tuning-buffer offsets "
+                    + $"likely don't fit this hardware - refusing to write ({mismatch}). Run 'layout', and "
+                    + "see DEVELOPMENT.md (Confirming another card).");
             }
 
             var (capMv, targetMhz) = request.Resolve(stock);
@@ -418,6 +435,7 @@ internal static class Cli
             All are read-only.
 
               curve            Dump the full live V/F curve (voltage -> frequency).
+              layout           Auto-detect the V/F curve buffer offsets (for porting to a new card).
               voltage          Snapshot the live core voltage, clock, temperature and power.
               clocks           Show current/base/boost clocks for the core and memory domains.
               scan <value>     Find where a value is stored across the tuning buffers.

@@ -23,6 +23,55 @@ internal static class Diagnostics
         return 0;
     }
 
+    /// <summary>Auto-detects the status (effective curve) buffer's record layout from a live read and
+    /// prints it next to the compiled offsets, so confirming or porting to a new card doesn't need the
+    /// manual snapshot/diff derivation. Read-only.</summary>
+    public static int Layout(IntPtr gpu)
+    {
+        if (!CurveLayout.TryDetect(NvApi.ReadVfCurveStatusRaw(gpu), out CurveLayout d))
+        {
+            Console.Error.WriteLine(
+                "Could not find a V/F curve in the status buffer - its function id or size may differ on "
+                + "this card. Use 'probe'/'extent' to find them, then 'raw' to inspect the words.");
+            return 1;
+        }
+
+        // Detection pins the stride and the columns' absolute byte offsets; the base/offset split is a
+        // convention, so report the columns relative to the build's base (so they read as the Status*
+        // offsets to paste). base + offset is what the decode actually uses, so the split doesn't matter.
+        int b = NvApi.StatusEntryBase;
+        string freq = d.FreqColumn >= 0
+            ? $"freq +0x{d.FreqColumn - b:X2}"
+            : "freq +0x?? (collapsed - re-run under a 3D load to detect it)";
+        Console.WriteLine("Status (effective curve) buffer - detected layout:");
+        Console.WriteLine($"  base 0x{b:X2}  stride {d.Stride}  volt +0x{d.VoltColumn - b:X2}  {freq}  ({d.Count} anchors)");
+        Console.WriteLine($"  compiled: base 0x{b:X2}  stride {NvApi.StatusEntryStride}  "
+                          + $"volt +0x{NvApi.StatusVoltOffset:X2}  freq +0x{NvApi.StatusFreqOffset:X2}");
+        if (d.MismatchVsCompiled() is not null)
+        {
+            Console.WriteLine("  -> differs from the build; update the Status* offsets in src/NvApi.cs.");
+        }
+        else if (d.FreqColumn < 0)
+        {
+            Console.WriteLine("  -> stride and voltage match the build; re-run under a 3D load to confirm "
+                              + "the freq column too.");
+        }
+        else
+        {
+            Console.WriteLine("  -> matches the build; the read path fits this card.");
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("Control (editable deltas) buffer carries no voltage, so derive it with a write:");
+        Console.WriteLine("  'snapshot', nudge one curve point in Afterburner, then 'diff' - the changed "
+                          + "curveControl words give");
+        Console.WriteLine("  the stride (their spacing) and delta offset; the run starts at control entry "
+                          + "i-1 for the lowest moved");
+        Console.WriteLine($"  status anchor i. Compiled: base 0x{NvApi.CtrlEntryBase:X2}  stride "
+                          + $"{NvApi.CtrlEntryStride}  delta +0x{NvApi.CtrlDeltaOffset:X2}.");
+        return 0;
+    }
+
     /// <summary>Dumps the raw 32-bit words a 2-arg GET writes, for locating unknown fields.</summary>
     public static int Raw(IntPtr gpu, string[] args)
     {

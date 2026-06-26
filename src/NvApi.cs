@@ -322,15 +322,20 @@ internal static class NvApi
     // these are handled as raw bytes. The status buffer reports the *effective* curve (it reflects an
     // applied offset); the control buffer holds only the editable freq deltas (0 at stock).
     private const int CONTROL_TABLE_SIZE = 9248; // ClkVfPointsGetControl / SetControl, version 1
-    private const int CtrlEntryBase = 0x64;
-    private const int CtrlEntryStride = 36;
-    private const int CtrlDeltaOffset = 0x18; // signed kHz frequency delta within an entry
+    public const int CtrlEntryBase = 0x64;
+    public const int CtrlEntryStride = 36;
+    public const int CtrlDeltaOffset = 0x18; // signed kHz frequency delta within an entry
 
     private const int StatusCurveSize = 7208; // ClkVfPointsGetStatus, version 1
-    private const int StatusEntryBase = 0x40;
-    private const int StatusEntryStride = 28;
-    private const int StatusFreqOffset = 0x08; // kHz
-    private const int StatusVoltOffset = 0x0C; // uV
+    public const int StatusEntryBase = 0x40;
+    public const int StatusEntryStride = 28;
+    public const int StatusFreqOffset = 0x08; // kHz
+    public const int StatusVoltOffset = 0x0C; // uV
+
+    /// <summary>The raw status (effective curve) buffer, for auto-detecting the curve layout on an
+    /// unverified card (see the <c>layout</c> diagnostic). Read-only.</summary>
+    public static byte[] ReadVfCurveStatusRaw(IntPtr gpu)
+        => ReadRaw(gpu, ID_GPU_GetVfCurveStatus, 1, StatusCurveSize, StatusCurveSize, requestMaskWords: 4);
 
     /// <summary>Reads the V/F curve as ordered (millivolt, megahertz) points. The voltage of each
     /// anchor is stable, but the frequency column reflects the <em>live</em> curve, so at deep idle it
@@ -339,8 +344,7 @@ internal static class NvApi
     /// ascending voltage, independent of the frequency, so the voltage map survives an idle read.</summary>
     public static IReadOnlyList<(int Mv, int Mhz)> GetVfCurve(IntPtr gpu)
     {
-        byte[] bytes = ReadRaw(gpu, ID_GPU_GetVfCurveStatus, 1, StatusCurveSize, StatusCurveSize,
-            requestMaskWords: 4);
+        byte[] bytes = ReadVfCurveStatusRaw(gpu);
 
         var points = new List<(int Mv, int Mhz)>();
         int lastVoltUv = 0;
