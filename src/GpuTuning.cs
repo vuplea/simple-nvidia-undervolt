@@ -282,17 +282,36 @@ internal sealed class GpuTuning
         return max >= 1500; // the card is in a real power state
     }
 
-    /// <summary>Independently re-detects the status buffer's layout from a fresh read and checks it against
-    /// the offsets compiled into <see cref="NvApi"/>, returning a mismatch description or null when it fits.
-    /// This is the autonomous form of "is this a card we recognize?": the tuning-buffer offsets are
-    /// hardware-specific, so before writing through them the read path confirms they actually land on this
-    /// GPU's V/F curve. It is the same check the <c>layout</c> diagnostic prints. The voltage column is
-    /// power-state independent, so stride and voltage always verify; the frequency column only verifies
-    /// under load and is skipped at idle.</summary>
-    public static string? CurveLayoutMismatch(IntPtr gpu)
-        => CurveLayout.TryDetect(NvApi.ReadVfCurveStatusRaw(gpu), out CurveLayout layout)
-            ? layout.MismatchVsCompiled()
-            : "no V/F curve found in the status buffer (the buffer offsets likely don't match this GPU)";
+    /// <summary>Whether the curve's <em>voltage</em> axis looks like a real NVIDIA V/F table: a long,
+    /// strictly ascending run of plausible core voltages. The voltage column is power-state
+    /// independent (unlike the frequency column <see cref="CurveFreqsReadable"/> guards), so this
+    /// stays true on a supported card even at idle, but reads false when the status-buffer offsets
+    /// don't match the hardware and the bytes decode as garbage (a short or narrow list). It gates
+    /// <em>writing</em>: the tuning-buffer offsets are hardware-specific, so if the curve we target
+    /// isn't one we recognize, no tuning should be written at all.</summary>
+    public static bool CurveVoltsPlausible(IReadOnlyList<(int Mv, int Mhz)> curve)
+    {
+        // A real table has ~127 anchors; a mismatched layout breaks out after a few points.
+        if (curve.Count < 16)
+        {
+            return false;
+        }
+
+        // Strictly ascending in voltage — each anchor a distinct, higher voltage. A garbage read off
+        // an unrecognized layout won't hold this across the whole run. (Checking it here also makes
+        // the span below well-defined rather than assuming the caller pre-sorted.)
+        for (int i = 1; i < curve.Count; i++)
+        {
+            if (curve[i].Mv <= curve[i - 1].Mv)
+            {
+                return false;
+            }
+        }
+
+        // ...and it spans up into real boost-voltage territory.
+        int span = curve[^1].Mv - curve[0].Mv;
+        return span >= 200 && curve[^1].Mv >= 900;
+    }
 
     /// <summary>The stock frequency (MHz) at a given voltage, linearly interpolated over the curve.</summary>
     public static double FreqAtVoltage(IReadOnlyList<(int Mv, int Mhz)> curve, double mv)

@@ -16,6 +16,12 @@ internal static class TestCurves
     public static List<(int Mv, int Mhz)> Collapsed(int n = 20)
         => Enumerable.Range(0, n).Select(i => (800 + i * 20, 195)).ToList();
 
+    /// <summary>A very short curve — the shape <see cref="NvApi.GetVfCurve"/> returns when the status
+    /// buffer offsets don't match the hardware, so it breaks out after only a few plausible-looking
+    /// points. Too short to be a real V/F table.</summary>
+    public static List<(int Mv, int Mhz)> Garbage()
+        => new() { (820, 2100), (910, 2300), (1010, 2600), (1100, 2800) };
+
     /// <summary>Reconstructs the effective frequency per anchor from a stock curve and the kHz deltas a
     /// <see cref="GpuTuning.CurvePlan"/> would write.</summary>
     public static int[] Apply(IReadOnlyList<(int Mv, int Mhz)> stock, int[] deltasKhz)
