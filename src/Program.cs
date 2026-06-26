@@ -178,6 +178,27 @@ internal static class Cli
         Console.WriteLine($"  Core curve offset: {tuning.DescribeCoreCurve()}");
         Console.WriteLine($"  Memory clock: {tuning.DescribeMemoryClock()}");
         Console.WriteLine($"  Core voltage boost: {tuning.DescribeVoltageBoost()}");
+
+        // Validate the read the same way the write path does: if the V/F curve doesn't decode as a
+        // recognized table, the tuning-buffer offsets likely don't fit this GPU and the readings above
+        // may be wrong. Warn (don't fail - status is read-only) and dump the detected layout for a report.
+        try
+        {
+            if (!GpuTuning.CurveVoltsPlausible(NvApi.GetVfCurve(gpu)))
+            {
+                Console.WriteLine("  Warning: the V/F curve didn't read as a recognized NVIDIA table - the "
+                                  + "tuning-buffer offsets may not match this GPU, so the readings may be wrong.");
+                foreach (string line in GpuTuning.DetectedLayoutReport(gpu))
+                {
+                    Console.WriteLine($"  {line}");
+                }
+            }
+        }
+        catch (NvApiException)
+        {
+            // Couldn't read the curve at all; the offset readings above already reflect that.
+        }
+
         return 0;
     }
 
@@ -254,6 +275,11 @@ internal static class Cli
             IReadOnlyList<(int Mv, int Mhz)> stock = GpuTuning.StockCurve(gpu);
             if (!request.DryRun && !GpuTuning.CurveVoltsPlausible(stock))
             {
+                foreach (string line in GpuTuning.DetectedLayoutReport(gpu))
+                {
+                    Console.WriteLine($"  {line}");
+                }
+
                 throw new NvApiException(
                     "the V/F curve didn't read as a recognized NVIDIA table on this GPU, so the "
                     + "tuning-buffer offsets likely don't match this hardware - refusing to write. "

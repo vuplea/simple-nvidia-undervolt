@@ -313,6 +313,32 @@ internal sealed class GpuTuning
         return span >= 200 && curve[^1].Mv >= 900;
     }
 
+    /// <summary>When <see cref="CurveVoltsPlausible"/> rejects a read, re-detects the status buffer's
+    /// actual layout and describes it next to the offsets this build compiled in — diagnostic detail to
+    /// drop into a bug report when a card's tuning-buffer layout isn't the one we expect. Best-effort: any
+    /// read failure is reported as a line rather than thrown.</summary>
+    public static IReadOnlyList<string> DetectedLayoutReport(IntPtr gpu)
+    {
+        int b = NvApi.StatusEntryBase;
+        var lines = new List<string> { "Curve buffer layout (please include in a bug report):" };
+        try
+        {
+            lines.Add(CurveLayout.TryDetect(NvApi.ReadVfCurveStatusRaw(gpu), out CurveLayout d)
+                ? $"  detected: stride {d.Stride}  volt +0x{d.VoltColumn - b:X2}  "
+                  + (d.FreqColumn >= 0 ? $"freq +0x{d.FreqColumn - b:X2}" : "freq +0x?? (idle - re-run under load)")
+                  + $"  ({d.Count} anchors)"
+                : "  detected: no V/F curve found in the status buffer");
+        }
+        catch (NvApiException ex)
+        {
+            lines.Add($"  detected: layout read failed ({ex.Message})");
+        }
+
+        lines.Add($"  compiled: stride {NvApi.StatusEntryStride}  volt +0x{NvApi.StatusVoltOffset:X2}  "
+                  + $"freq +0x{NvApi.StatusFreqOffset:X2}");
+        return lines;
+    }
+
     /// <summary>The stock frequency (MHz) at a given voltage, linearly interpolated over the curve.</summary>
     public static double FreqAtVoltage(IReadOnlyList<(int Mv, int Mhz)> curve, double mv)
         => Interpolate(curve, mv, p => p.Mv, p => p.Mhz);
