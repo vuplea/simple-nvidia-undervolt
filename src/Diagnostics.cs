@@ -23,6 +23,47 @@ internal static class Diagnostics
         return 0;
     }
 
+    /// <summary>Auto-detects the status (effective curve) buffer's record layout from a live read and
+    /// prints it next to the compiled offsets, flagging whether they match - read-only confirmation that
+    /// this build's read offsets fit the card (the same detection the status/undervolt warnings use, run
+    /// on demand). The control (write) buffer carries no voltage to detect, so it points at snapshot/diff.</summary>
+    public static int Layout(IntPtr gpu)
+    {
+        if (!CurveLayout.TryDetect(NvApi.ReadVfCurveStatusRaw(gpu), out CurveLayout d))
+        {
+            Console.Error.WriteLine(
+                "Could not find a V/F curve in the status buffer - its function id or size may differ on "
+                + "this card. Use 'probe'/'extent' to find them, then 'raw' to inspect the words.");
+            return 1;
+        }
+
+        Console.WriteLine("Status (effective curve) buffer:");
+        Console.WriteLine($"  detected: {d.DescribeColumns(NvApi.StatusEntryBase)}");
+        Console.WriteLine($"  compiled: {CurveLayout.DescribeCompiled()}");
+        if (d.MismatchVsCompiled() is not null)
+        {
+            Console.WriteLine("  -> differs from the build; update the Status* offsets in src/NvApi.cs.");
+        }
+        else if (d.FreqColumn < 0)
+        {
+            Console.WriteLine("  -> stride and voltage match; re-run under a 3D load to confirm the freq column.");
+        }
+        else
+        {
+            Console.WriteLine("  -> matches the build; the read path fits this card.");
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("Control (editable deltas) buffer carries no voltage, so derive it with a write:");
+        Console.WriteLine("  'snapshot', nudge one curve point in Afterburner, then 'diff' - the changed "
+                          + "curveControl words give the");
+        Console.WriteLine("  stride (their spacing) and delta offset; the run starts at control entry i-1 "
+                          + "for the lowest moved");
+        Console.WriteLine($"  status anchor i. Compiled: stride {NvApi.CtrlEntryStride}  delta "
+                          + $"+0x{NvApi.CtrlDeltaOffset:X2}.");
+        return 0;
+    }
+
     /// <summary>Dumps the raw 32-bit words a 2-arg GET writes, for locating unknown fields.</summary>
     public static int Raw(IntPtr gpu, string[] args)
     {

@@ -319,24 +319,16 @@ internal sealed class GpuTuning
     /// read failure is reported as a line rather than thrown.</summary>
     public static IReadOnlyList<string> DetectedLayoutReport(IntPtr gpu)
     {
-        int b = NvApi.StatusEntryBase;
-        var lines = new List<string> { "Curve buffer layout (please include in a bug report):" };
         try
         {
-            lines.Add(CurveLayout.TryDetect(NvApi.ReadVfCurveStatusRaw(gpu), out CurveLayout d)
-                ? $"  detected: stride {d.Stride}  volt +0x{d.VoltColumn - b:X2}  "
-                  + (d.FreqColumn >= 0 ? $"freq +0x{d.FreqColumn - b:X2}" : "freq +0x?? (idle - re-run under load)")
-                  + $"  ({d.Count} anchors)"
-                : "  detected: no V/F curve found in the status buffer");
+            return CurveLayout.TryDetect(NvApi.ReadVfCurveStatusRaw(gpu), out CurveLayout d)
+                ? new[] { $"detected: {d.DescribeColumns(NvApi.StatusEntryBase)}", $"compiled: {CurveLayout.DescribeCompiled()}" }
+                : new[] { "detected: no V/F curve found in the status buffer", $"compiled: {CurveLayout.DescribeCompiled()}" };
         }
         catch (NvApiException ex)
         {
-            lines.Add($"  detected: layout read failed ({ex.Message})");
+            return new[] { $"detected: layout read failed ({ex.Message})" };
         }
-
-        lines.Add($"  compiled: stride {NvApi.StatusEntryStride}  volt +0x{NvApi.StatusVoltOffset:X2}  "
-                  + $"freq +0x{NvApi.StatusFreqOffset:X2}");
-        return lines;
     }
 
     /// <summary>The stock frequency (MHz) at a given voltage, linearly interpolated over the curve.</summary>

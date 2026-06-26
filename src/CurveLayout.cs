@@ -52,6 +52,30 @@ internal readonly record struct CurveLayout(int Stride, int VoltColumn, int Freq
         return true;
     }
 
+    /// <summary>The detected columns as a one-line description, with the columns expressed relative to
+    /// <paramref name="baseRef"/> (the build's base, so they read as the <c>Status*</c> offsets to paste).
+    /// At idle the frequency column is unknown and shown as <c>+0x??</c>.</summary>
+    public string DescribeColumns(int baseRef)
+        => $"stride {Stride}  volt +0x{VoltColumn - baseRef:X2}  "
+           + (FreqColumn >= 0 ? $"freq +0x{FreqColumn - baseRef:X2}" : "freq +0x?? (idle - run under load)")
+           + $"  ({Count} anchors)";
+
+    /// <summary>The offsets this build compiled in, formatted like <see cref="DescribeColumns"/> (without
+    /// an anchor count) for side-by-side comparison.</summary>
+    public static string DescribeCompiled()
+        => $"stride {NvApi.StatusEntryStride}  volt +0x{NvApi.StatusVoltOffset:X2}  freq +0x{NvApi.StatusFreqOffset:X2}";
+
+    /// <summary>How the detected layout differs from the offsets compiled into <see cref="NvApi"/>, or null
+    /// when it matches (the frequency column is skipped when idle and undetected, since it can't be read).</summary>
+    public string? MismatchVsCompiled()
+    {
+        int b = NvApi.StatusEntryBase;
+        bool matches = Stride == NvApi.StatusEntryStride
+            && VoltColumn == b + NvApi.StatusVoltOffset
+            && (FreqColumn < 0 || FreqColumn == b + NvApi.StatusFreqOffset);
+        return matches ? null : $"detected {DescribeColumns(b)}; compiled {DescribeCompiled()}";
+    }
+
     /// <summary>How many consecutive records from the column at absolute offset <paramref name="col"/> hold
     /// a strictly-ascending, plausible core voltage (uV), stepping by <paramref name="stride"/>.</summary>
     private static int AscendingVoltRun(byte[] buf, int col, int stride)

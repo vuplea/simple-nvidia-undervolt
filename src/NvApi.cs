@@ -322,9 +322,9 @@ internal static class NvApi
     // these are handled as raw bytes. The status buffer reports the *effective* curve (it reflects an
     // applied offset); the control buffer holds only the editable freq deltas (0 at stock).
     private const int CONTROL_TABLE_SIZE = 9248; // ClkVfPointsGetControl / SetControl, version 1
-    private const int CtrlEntryBase = 0x64;
-    private const int CtrlEntryStride = 36;
-    private const int CtrlDeltaOffset = 0x18; // signed kHz frequency delta within an entry
+    public const int CtrlEntryBase = 0x64;
+    public const int CtrlEntryStride = 36;
+    public const int CtrlDeltaOffset = 0x18; // signed kHz frequency delta within an entry
 
     private const int StatusCurveSize = 7208; // ClkVfPointsGetStatus, version 1
     public const int StatusEntryBase = 0x40;

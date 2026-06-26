@@ -47,6 +47,34 @@ public class LayoutDetectionTests
         Assert.False(CurveLayout.TryDetect(new byte[7208], out _));
     }
 
+    [Fact]
+    public void MismatchVsCompiled_NullWhenColumnsMatchTheBuild()
+    {
+        var match = new CurveLayout(NvApi.StatusEntryStride,
+            NvApi.StatusEntryBase + NvApi.StatusVoltOffset,
+            NvApi.StatusEntryBase + NvApi.StatusFreqOffset, 127);
+        Assert.Null(match.MismatchVsCompiled());
+    }
+
+    [Fact]
+    public void MismatchVsCompiled_NonNullWhenAColumnDiffers()
+    {
+        var off = new CurveLayout(NvApi.StatusEntryStride,
+            NvApi.StatusEntryBase + NvApi.StatusVoltOffset + 4,   // voltage column off by a word
+            NvApi.StatusEntryBase + NvApi.StatusFreqOffset, 127);
+        Assert.NotNull(off.MismatchVsCompiled());
+    }
+
+    [Fact]
+    public void MismatchVsCompiled_SkipsTheFreqColumnWhenIdle()
+    {
+        // Stride and voltage match; the freq column is undetected (-1) at idle, so it isn't held against
+        // the build - the read path still counts as fitting.
+        var idle = new CurveLayout(NvApi.StatusEntryStride,
+            NvApi.StatusEntryBase + NvApi.StatusVoltOffset, -1, 127);
+        Assert.Null(idle.MismatchVsCompiled());
+    }
+
     /// <summary>A synthetic status buffer: <paramref name="count"/> records of <paramref name="stride"/>
     /// bytes starting at <paramref name="baseOffset"/>, each carrying an ascending core voltage (uV) and a
     /// non-decreasing frequency (kHz) that ramps to <paramref name="peakBoostKhz"/>. Everything else is

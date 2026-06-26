@@ -130,6 +130,7 @@ internal static class Cli
                 "probe" => Diagnostics.Probe(gpu, args),
                 "extent" => Diagnostics.Extent(gpu, args),
                 "curve" => Diagnostics.Curve(gpu),
+                "layout" => Diagnostics.Layout(gpu),
                 "voltage" or "volt" => Diagnostics.Voltage(gpu),
                 "watch" => Diagnostics.Watch(gpu),
                 "clocks" => Diagnostics.Clocks(gpu),
@@ -283,7 +284,7 @@ internal static class Cli
                 throw new NvApiException(
                     "the V/F curve didn't read as a recognized NVIDIA table on this GPU, so the "
                     + "tuning-buffer offsets likely don't match this hardware - refusing to write. "
-                    + "See DEVELOPMENT.md (Confirming another card).");
+                    + "See DEVELOPMENT.md (Porting the offsets to a new card).");
             }
 
             var (capMv, targetMhz) = request.Resolve(stock);
@@ -444,6 +445,7 @@ internal static class Cli
             All are read-only.
 
               curve            Dump the full live V/F curve (voltage -> frequency).
+              layout           Check the V/F curve buffer offsets against this card (for porting).
               voltage          Snapshot the live core voltage, clock, temperature and power.
               clocks           Show current/base/boost clocks for the core and memory domains.
               scan <value>     Find where a value is stored across the tuning buffers.
