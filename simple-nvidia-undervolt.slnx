@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/simple-nvidia-undervolt.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/SimpleNvidiaUndervolt.Tests.csproj" />
+  </Folder>
+  <Folder Name="/e2e/">
+    <Project Path="e2e/SimpleNvidiaUndervolt.E2E.csproj" />
+  </Folder>
+</Solution>

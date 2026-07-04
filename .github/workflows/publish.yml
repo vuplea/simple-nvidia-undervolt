@@ -1,0 +1,77 @@
+name: publish
+
+# Build the Native AOT standalone exe and attach it to a GitHub Release on a version tag.
+# Runs on Windows: the target is net*-windows and AOT linking needs the MSVC toolchain,
+# both of which the windows-latest runner provides. Push a tag like v1.0.1 to publish a release;
+# a manual run just uploads the exe as a build artifact.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write # create releases and upload assets
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # Pure-logic unit tests only; the e2e suite needs an NVIDIA GPU + admin and self-skips off one.
+      - name: Test
+        run: dotnet test tests -c Release
+
+      # The e2e tests can't run here (no GPU), but they must at least keep compiling.
+      - name: Build e2e
+        run: dotnet build e2e -c Release
+
+      # A tag push stamps the tag's version into the binary (--version, bug-report layout dumps);
+      # any other build keeps the csproj's 0.0.0, which marks it as a non-release build.
+      - name: Publish (Native AOT, standalone single-file exe)
+        run: |
+          $version = if ('${{ github.ref_type }}' -eq 'tag') { '${{ github.ref_name }}'.TrimStart('v') } else { '0.0.0' }
+          dotnet publish src -c Release -p:Version=$version
+
+      # A SHA256 next to the unsigned exe lets a downloader verify what SmartScreen can't vouch for.
+      - name: Checksum
+        run: >
+          "$((Get-FileHash src/publish/simple-nvidia-undervolt.exe -Algorithm SHA256).Hash.ToLower())  simple-nvidia-undervolt.exe"
+          | Set-Content src/publish/simple-nvidia-undervolt.exe.sha256
+
+      # The profiles zip: the per-generation shortcut tree generated from profiles/profiles.json,
+      # PROFILES.md as the zip's README, and an installer-named copy of the exe - double-clicking
+      # that copy runs 'install', which the shortcuts need once per machine.
+      - name: Profiles zip
+        run: |
+          $stage = 'src/publish/profiles'
+          profiles/generate.ps1 -OutDir $stage
+          Copy-Item PROFILES.md "$stage/~README.txt"
+          Copy-Item src/publish/simple-nvidia-undervolt.exe "$stage/~install-simple-nvidia-undervolt.exe"
+          Compress-Archive -Path "$stage/*" -DestinationPath src/publish/simple-nvidia-undervolt-profiles.zip
+          "$((Get-FileHash src/publish/simple-nvidia-undervolt-profiles.zip -Algorithm SHA256).Hash.ToLower())  simple-nvidia-undervolt-profiles.zip" |
+            Set-Content src/publish/simple-nvidia-undervolt-profiles.zip.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: simple-nvidia-undervolt
+          path: |
+            src/publish/simple-nvidia-undervolt.exe
+            src/publish/simple-nvidia-undervolt.exe.sha256
+            src/publish/simple-nvidia-undervolt-profiles.zip
+            src/publish/simple-nvidia-undervolt-profiles.zip.sha256
+          if-no-files-found: error
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            src/publish/simple-nvidia-undervolt.exe
+            src/publish/simple-nvidia-undervolt.exe.sha256
+            src/publish/simple-nvidia-undervolt-profiles.zip
+            src/publish/simple-nvidia-undervolt-profiles.zip.sha256
