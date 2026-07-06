@@ -1,7 +1,7 @@
 namespace SimpleNvidiaUndervolt.Tests;
 
 /// <summary>Tests for the logon-task registration: the command line it runs — the resolved undervolt
-/// (from <see cref="TuneRequest.ToAbsoluteArgs"/>) plus the fixed flags an unattended,
+/// (from <see cref="TuneRequest.ToPersistedArgs"/>) plus the fixed flags an unattended,
 /// already-elevated re-apply needs — and how it is built and read back.</summary>
 public class PersistenceTests
 {
@@ -16,13 +16,14 @@ public class PersistenceTests
               <Actions Context="Author">
                 <Exec>
                   <Command>"C:\Program Files\simple-nvidia-undervolt\simple-nvidia-undervolt.exe"</Command>
-                  <Arguments>--mv 960 --mhz 2880 --no-persist</Arguments>
+                  <Arguments>--mv 960 --mhz-offset 190 --peak-mv 960 --no-persist --silent</Arguments>
                 </Exec>
               </Actions>
             </Task>
             """;
 
-        Assert.Equal("--mv 960 --mhz 2880 --no-persist", Persistence.ParseTaskArguments(xml));
+        Assert.Equal("--mv 960 --mhz-offset 190 --peak-mv 960 --no-persist --silent",
+            Persistence.ParseTaskArguments(xml));
     }
 
     [Fact]

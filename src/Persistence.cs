@@ -17,15 +17,15 @@ internal static class Persistence
     private const int MaxTaskRunLength = 261;
 
     /// <summary>Registers the logon task that re-applies the undervolt, returning the one-line log
-    /// message. <paramref name="absoluteArgs"/> is the fully-resolved undervolt command line (see
-    /// <see cref="TuneRequest.ToAbsoluteArgs"/>). The caller installs the app first (see
+    /// message. <paramref name="persistedArgs"/> is the resolved undervolt command line (see
+    /// <see cref="TuneRequest.ToPersistedArgs"/>). The caller installs the app first (see
     /// <see cref="InstallApp"/>); the task targets that copy.</summary>
-    public static string RegisterLogonTask(string[] absoluteArgs)
+    public static string RegisterLogonTask(string[] persistedArgs)
     {
         // Run at logon (not at boot): the task then lives in the user's interactive session, so it can
         // reach the GPU and its failure box is actually on screen. /RL HIGHEST runs it elevated,
         // which the driver writes need.
-        string taskRun = BuildTaskRun(InstalledNoCmdExePath(), absoluteArgs);
+        string taskRun = BuildTaskRun(InstalledNoCmdExePath(), persistedArgs);
         RunSchtasks("/Create", "/F", "/TN", TaskName, "/SC", "ONLOGON", "/RL", "HIGHEST", "/TR", taskRun);
         return $"Registered logon task '{TaskName}'.";
     }
@@ -225,9 +225,9 @@ internal static class Persistence
     /// <summary>The logon task's full command line: the quoted installed exe, the resolved undervolt and
     /// the <see cref="StartupFixedArgs"/>. Validated against <see cref="MaxTaskRunLength"/> here, since
     /// schtasks' own error doesn't name the limit.</summary>
-    internal static string BuildTaskRun(string targetExe, string[] absoluteArgs)
+    internal static string BuildTaskRun(string targetExe, string[] persistedArgs)
     {
-        string taskRun = CommandLine.Join(absoluteArgs.Concat(StartupFixedArgs).Prepend(targetExe));
+        string taskRun = CommandLine.Join(persistedArgs.Concat(StartupFixedArgs).Prepend(targetExe));
         if (taskRun.Length > MaxTaskRunLength)
         {
             throw new CliError($"The logon task's command line is {taskRun.Length} characters; "

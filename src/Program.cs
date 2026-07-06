@@ -395,9 +395,9 @@ internal static class Cli
             Console.WriteLine(targetMhz is { } f ? $"  Frequency: {f} MHz" : "  Frequency: stock clock");
         }
 
-        // The absolute memory clock and the delta to write; the absolute value is captured for the
-        // logon task so it re-applies this exact undervolt without re-resolving against the base
-        // clock (see ToAbsoluteArgs).
+        // The absolute memory clock and the delta to write. The absolute clock is also what the logon
+        // task re-applies: its reference (the factory base clock) is static, so unlike the curve
+        // clock it can't drift between runs (see ToPersistedArgs).
         (int TargetMhz, int DeltaKhz)? memory = null;
         if (request.Mem.IsSet)
         {
@@ -470,8 +470,8 @@ internal static class Cli
                     Console.WriteLine($"Installed to {Persistence.InstallDir()}.");
                 }
 
-                Console.WriteLine(Persistence.RegisterLogonTask(
-                    request.ToAbsoluteArgs(plan?.CapMv, targetMhz, memory?.TargetMhz)));
+                Console.WriteLine(Persistence.RegisterLogonTask(request.ToPersistedArgs(
+                    plan?.CapMv, targetMhz is null ? null : plan?.CapDeltaMhz, memory?.TargetMhz)));
             }
             catch (Exception ex)
             {

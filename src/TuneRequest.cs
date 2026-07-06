@@ -238,25 +238,33 @@ internal sealed class TuneRequest
         return (targetMv, targetMhz);
     }
 
-    /// <summary>The fully-resolved command line to persist for the logon re-apply: the absolute values
-    /// actually applied, so the task reproduces this exact tuning without re-reading the (idle) curve
-    /// or depending on a peak reference. Every offset/percentage and peak flag collapses into a plain
-    /// <c>--mv</c>/<c>--mhz</c>/<c>--mem</c> here (<paramref name="capMv"/> is null on a memory-only
-    /// run); <c>--cap-points</c> rides along only when non-default. No command word: a leading option
-    /// implies <c>tune</c>, so the generated line is exactly what a user would type.</summary>
-    public string[] ToAbsoluteArgs(int? capMv, int? targetMhz, int? memMhz)
+    /// <summary>The resolved command line to persist for the logon re-apply. The cap voltage and
+    /// memory clock persist as the absolute values actually applied — both reference static
+    /// quantities (the curve's anchor voltages, the factory base memory clock). The clock persists
+    /// <em>cap-relative</em>: <c>--mhz-offset</c> with <c>--peak-mv</c> set to the cap anchor
+    /// itself. The driver's reported curve shifts with temperature, so re-resolving that offset
+    /// against the logon-time read re-applies the exact frequency offset that was validated; a
+    /// baked absolute clock would drift from it by the thermal shift between the original read and
+    /// the boot-time read. Every user-typed offset/percentage and peak flag collapses into this
+    /// canonical form (<paramref name="capMv"/> is null on a memory-only run,
+    /// <paramref name="capDeltaMhz"/> also when no clock was requested); <c>--cap-points</c> rides
+    /// along only when non-default. No command word: a leading option implies <c>tune</c>, so the
+    /// generated line is exactly what a user would type.</summary>
+    public string[] ToPersistedArgs(int? capMv, int? capDeltaMhz, int? memMhz)
     {
         var args = new List<string>();
         if (capMv is { } mv)
         {
             args.Add("--mv");
             args.Add(Invariant(mv));
-        }
 
-        if (targetMhz is { } f)
-        {
-            args.Add("--mhz");
-            args.Add(Invariant(f));
+            if (capDeltaMhz is { } d)
+            {
+                args.Add("--mhz-offset");
+                args.Add(Invariant(d));
+                args.Add("--peak-mv");
+                args.Add(Invariant(mv));
+            }
         }
 
         if (memMhz is { } m)

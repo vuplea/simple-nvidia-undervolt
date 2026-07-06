@@ -379,44 +379,102 @@ public class TuneRequestTests
             () => Parse("tune", "--mv", "960", "--mem", mem).ResolveMemory(baseMemMhz: 14001));
     }
 
-    // --- ToAbsoluteArgs (what the logon task re-applies) ---
+    // --- ToPersistedArgs (what the logon task re-applies) ---
 
     [Fact]
-    public void ToAbsoluteArgs_BakesTheResolvedCapAndClock()
+    public void ToPersistedArgs_EmitsTheClockCapRelative()
     {
-        // The relative form and peak reference collapse into the plain absolute values that were applied,
-        // so the persisted run doesn't re-read the curve or need the peak.
+        // The clock persists as an offset from the cap anchor's own stock clock (--peak-mv = the cap
+        // voltage), so the logon run re-resolves it against the boot-time curve read: the reported
+        // curve shifts with temperature, and the offset form re-applies the validated frequency
+        // offset at any temperature where a baked absolute clock would drift.
         var args = Parse("tune", "--mv-offset", "-100", "--peak-mv", "1060")
-            .ToAbsoluteArgs(capMv: 960, targetMhz: 2880, memMhz: null);
-        Assert.Equal(new[] { "--mv", "960", "--mhz", "2880" }, args);
+            .ToPersistedArgs(capMv: 960, capDeltaMhz: 190, memMhz: null);
+        Assert.Equal(new[] { "--mv", "960", "--mhz-offset", "190", "--peak-mv", "960" }, args);
     }
 
     [Fact]
-    public void ToAbsoluteArgs_OmitsClockWhenNoneWasSet()
+    public void ToPersistedArgs_OmitsClockWhenNoneWasSet()
     {
-        var args = Parse("tune", "--mv", "960").ToAbsoluteArgs(capMv: 960, targetMhz: null, memMhz: null);
+        var args = Parse("tune", "--mv", "960").ToPersistedArgs(capMv: 960, capDeltaMhz: null, memMhz: null);
         Assert.Equal(new[] { "--mv", "960" }, args);
     }
 
     [Fact]
-    public void ToAbsoluteArgs_IncludesMemoryAndNonDefaultCapPoints()
+    public void ToPersistedArgs_IncludesMemoryAndNonDefaultCapPoints()
     {
         var args = Parse("tune", "--mv", "960", "--mem-offset", "1000", "--cap-points", "4")
-            .ToAbsoluteArgs(capMv: 960, targetMhz: null, memMhz: 15001);
+            .ToPersistedArgs(capMv: 960, capDeltaMhz: null, memMhz: 15001);
         Assert.Equal(new[] { "--mv", "960", "--mem", "15001", "--cap-points", "4" }, args);
     }
 
     [Fact]
-    public void ToAbsoluteArgs_OmitsDefaultCapPoints()
+    public void ToPersistedArgs_OmitsDefaultCapPoints()
     {
-        var args = Parse("tune", "--mv", "960").ToAbsoluteArgs(capMv: 960, targetMhz: null, memMhz: null);
+        var args = Parse("tune", "--mv", "960").ToPersistedArgs(capMv: 960, capDeltaMhz: null, memMhz: null);
         Assert.DoesNotContain("--cap-points", args);
     }
 
     [Fact]
-    public void ToAbsoluteArgs_OmitsTheCapOnAMemoryOnlyRun()
+    public void ToPersistedArgs_OmitsTheCapOnAMemoryOnlyRun()
     {
-        var args = Parse("tune", "--mem-pct", "5").ToAbsoluteArgs(capMv: null, targetMhz: null, memMhz: 14700);
+        var args = Parse("tune", "--mem-pct", "5").ToPersistedArgs(capMv: null, capDeltaMhz: null, memMhz: 14700);
         Assert.Equal(new[] { "--mem", "14700" }, args);
+    }
+
+    // --- The persisted line's round trip: the logon run plans from a curve read at a different
+    // temperature than the original run, and must re-apply the same tuning ---
+
+    /// <summary>Resolves and plans <paramref name="request"/> against <paramref name="stock"/>,
+    /// exactly as a tune run does.</summary>
+    private static GpuTuning.CurvePlan PlanOn(TuneRequest request, List<(int Mv, int Mhz)> stock)
+    {
+        var (capMv, targetMhz) = request.Resolve(stock);
+        return GpuTuning.BuildCurvePlan(stock, capMv, targetMhz, request.CapPoints);
+    }
+
+    /// <summary>The re-apply a persisted run performs: parse the persisted line (with the implied
+    /// command word) and plan it against the boot-time curve.</summary>
+    private static GpuTuning.CurvePlan ReapplyOn(string[] persisted, List<(int Mv, int Mhz)> curve)
+        => PlanOn(Parse(persisted.Prepend("tune").ToArray()), curve);
+
+    [Fact]
+    public void PersistedArgs_ReapplyTheSameDeltas_OnATemperatureShiftedCurve()
+    {
+        // GPU Boost shifts the whole reported stock curve with core temperature, and the logon
+        // re-apply reads at boot temperature, not at the original run's. The cap-relative persisted
+        // form resolves every curve-dependent term from the boot-time read alone, so a uniform shift
+        // cancels out of all of it - the cap delta, the flatten above and the band - and the written
+        // vector is identical.
+        var stock = TestCurves.Realistic();        // anchor 10 = (1000 mV, 2500 MHz)
+        var request = Parse("tune", "--mv", "1000", "--mhz", "2600");
+        var plan = PlanOn(request, stock);
+        string[] persisted = request.ToPersistedArgs(plan.CapMv, plan.CapDeltaMhz, memMhz: null);
+
+        var colder = stock.Select(p => (p.Mv, p.Mhz + 45)).ToList();
+        var replan = ReapplyOn(persisted, colder);
+
+        Assert.Equal(plan.DeltasKhz, replan.DeltasKhz);
+    }
+
+    [Fact]
+    public void PersistedArgs_ReapplyTheExactCapOffset_EvenWhenTheShiftIsNotUniform()
+    {
+        // If the thermal shift bends across the curve instead of moving it as one block, the deltas
+        // in the flatten/band region can wobble - but the cap anchor's offset is resolved against
+        // that same anchor's own read, so it reproduces exactly no matter the shift's shape. The cap
+        // point is where the boost pins under load, so this is the part that must hold.
+        var stock = TestCurves.Realistic();        // anchor 10 = (1000 mV, 2500 MHz)
+        var request = Parse("tune", "--mv", "1000", "--mhz", "2600");
+        var plan = PlanOn(request, stock);
+        string[] persisted = request.ToPersistedArgs(plan.CapMv, plan.CapDeltaMhz, memMhz: null);
+
+        // A colder read where the shift tapers toward the top of the curve (+45 at the bottom anchor
+        // down to +26 at the top) - the compensation compressing as clocks near their ceiling.
+        var colder = stock.Select((p, i) => (p.Mv, p.Mhz + 45 - i)).ToList();
+        var replan = ReapplyOn(persisted, colder);
+
+        Assert.Equal(plan.CapDeltaMhz, replan.CapDeltaMhz);
+        Assert.Equal(plan.DeltasKhz[10], replan.DeltasKhz[10]); // the cap anchor's written delta
     }
 }

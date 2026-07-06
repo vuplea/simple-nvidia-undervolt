@@ -85,6 +85,10 @@ Other:
 The offset/pct forms are relative to the real under-load operating voltage — read it from `watch` under a
 sustained load.
 
+Apply your settings at a consistent GPU temperature — simplest with a cooled-down card. Clock targets
+resolve against the live curve, which shifts slightly with temperature, so applying hot vs. cold bakes
+in a slightly different tuning.
+
 ### Persisting at startup
 
 A tuning run **persists by default**: it copies the app to Program Files, and registers a Task Scheduler

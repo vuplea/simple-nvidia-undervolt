@@ -78,6 +78,10 @@ tier 3 — harmless, just no extra gain.
   −1% to −10% performance cost that grows with the tier and is steepest on RTX 40/50 (their clock
   follows voltage more tightly than older generations).
 
+Apply a profile with the card cooled down (idle desktop, not right after a gaming session). The
+tuning resolves against the live curve, which shifts slightly with temperature, so applying hot
+bakes in a slightly different tuning than applying cold.
+
 ## Where the values come from
 
 Instrumented reviews (TechPowerUp, Tom's Hardware, Igor's Lab, TechSpot, thefpsreview, QuasarZone)

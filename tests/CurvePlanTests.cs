@@ -12,6 +12,7 @@ public class CurvePlanTests
 
         Assert.Equal(1000, plan.CapMv);
         Assert.Equal(2500, plan.CapMhz);           // the stock clock at the cap
+        Assert.Equal(0, plan.CapDeltaMhz);         // no offset written at the cap
 
         // A plain cap has no offset (delta 0 at the cap), so the band changes nothing below it.
         for (int i = 0; i < stock.Count; i++)
@@ -29,6 +30,7 @@ public class CurvePlanTests
 
         Assert.Equal(1000, plan.CapMv);
         Assert.Equal(2600, plan.CapMhz);
+        Assert.Equal(100, plan.CapDeltaMhz);       // the offset written at the cap anchor
 
         // d = 2600 - 2500 = 100. The band is the cap (10) plus the 7 below it (3..9): all carry +100.
         // Above the cap the curve is flattened down to 2600; below the band it is untouched.
@@ -157,6 +159,7 @@ public class CurvePlanTests
 
         Assert.Equal(800, plan.CapMv);
         Assert.Equal(2000, plan.CapMhz);
+        Assert.Equal(0, plan.CapDeltaMhz);         // nothing was written at the unwritable anchor 0
         Assert.Equal(0, plan.DeltasKhz[0]);
     }
 

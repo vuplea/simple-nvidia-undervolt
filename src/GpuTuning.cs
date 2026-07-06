@@ -228,9 +228,12 @@ internal static class GpuTuning
     internal readonly record struct CurveChange(int Mv, int OldMhz, int NewMhz, int NewDeltaKhz);
 
     /// <summary>The computed curve write: the per-point frequency deltas (kHz, index-aligned with the
-    /// curve), the cap anchor and its flat frequency, and a description of every point that moves.</summary>
-    internal sealed record CurvePlan(int CapMv, int CapMhz, IReadOnlyList<CurveChange> Changes,
-        int[] DeltasKhz);
+    /// curve), the cap anchor, its flat frequency and the frequency offset written there
+    /// (<see cref="CapDeltaMhz"/>, 0 when the cap sits at the unwritable anchor 0 — see
+    /// <see cref="TuneRequest.ToPersistedArgs"/> for why the offset is what persists), and a
+    /// description of every point that moves.</summary>
+    internal sealed record CurvePlan(int CapMv, int CapMhz, int CapDeltaMhz,
+        IReadOnlyList<CurveChange> Changes, int[] DeltasKhz);
 
     /// <summary>
     /// Builds the curve write that caps voltage at <paramref name="capMv"/>, with every delta measured
@@ -314,7 +317,7 @@ internal static class GpuTuning
             }
         }
 
-        return new CurvePlan(stock[k].Mv, newMhz[k], changes, deltasKhz);
+        return new CurvePlan(stock[k].Mv, newMhz[k], deltasKhz[k] / 1000, changes, deltasKhz);
     }
 
     private static int NearestAnchorIndex(IReadOnlyList<(int Mv, int Mhz)> curve, int mv)
