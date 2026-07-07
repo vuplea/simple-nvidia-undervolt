@@ -43,7 +43,7 @@ jobs:
           "$((Get-FileHash src/publish/simple-nvidia-undervolt.exe -Algorithm SHA256).Hash.ToLower())  simple-nvidia-undervolt.exe"
           | Set-Content src/publish/simple-nvidia-undervolt.exe.sha256
 
-      # The profiles zip: the per-generation shortcut tree generated from profiles/profiles.json,
+      # The profiles zip: the per-card-range shortcut tree generated from profiles/profiles.json,
       # PROFILES.md as the zip's README, and an installer-named copy of the exe - double-clicking
       # that copy runs 'install', which the shortcuts need once per machine.
       - name: Profiles zip

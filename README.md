@@ -1,9 +1,9 @@
-# simple-nvidia-undervolt
+# <picture><source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.png"><img src="assets/logo-light.png" alt="simple-nvidia-undervolt logo: an NVIDIA GPU voltage/frequency curve flattening at the voltage cap" height="50" align="middle"></picture>&nbsp; simple-nvidia-undervolt
 
-A small Windows command-line alternative to MSI Afterburner for undervolting an NVIDIA GPU. It talks to
-the driver directly — no background process — and caps voltage by flattening the V/F curve.
+A small Windows command-line alternative to MSI Afterburner for overclocking or undervolting an NVIDIA GPU.
+It talks to the driver directly — no background process — and caps voltage by flattening the V/F curve.
 
-Undervolting an NVIDIA GPU shouldn't mean dragging points around a curve editor. **Only the top
+Overclocking/undervolting shouldn't mean dragging points around a curve editor. **Only the top
 segment usually matters** — the max voltage you allow and the clock you run there — because that's
 where the card sits under load, and it sets your peak framerate. To simplify, you can just set your
 desired voltage and frequency pair with this tool. To skip manual investigation of tuning options,
@@ -33,12 +33,12 @@ simple-nvidia-undervolt clear
 
 ### Ready-made profiles
 
-`simple-nvidia-undervolt-profiles.zip` contains folder of profile shortcuts per GPU
-generation — three families (perf boost / power cut at the same performance / deep power cut) in four
-risk tiers each, built from community-converged per-generation values. Extract the zip, double-click
-`~install-simple-nvidia-undervolt.exe` once (it copies the app to Program Files, which the shortcuts
-target), then double-click a profile from your generation's folder. [PROFILES.md](PROFILES.md)
-explains the matrix and the values.
+`simple-nvidia-undervolt-profiles.zip` contains folders of profile shortcuts per card range —
+three families (perf boost / power cut at the same performance / deep power cut) in four risk
+tiers each, built from community-converged values per generation, memory type and power-limit
+class. Extract the zip, double-click `~install-simple-nvidia-undervolt.exe` once (it copies the
+app to Program Files, which the shortcuts target), then double-click a profile from the folder
+that lists your card. [PROFILES.md](PROFILES.md) explains the matrix and the values.
 
 ## Usage
 

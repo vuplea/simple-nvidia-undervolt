@@ -19,12 +19,15 @@ public class ProfilesTests
     }
 
     [Fact]
-    public void EveryGenerationShipsThreeFamiliesInFourTiersPlusReset()
+    public void EveryFolderShipsThreeFamiliesInFourTiersPlusReset()
     {
-        var generations = LoadProfiles();
-        Assert.Equal(5, generations.Count);
-        foreach (Dictionary<string, string> profiles in generations.Values)
+        var folders = LoadProfiles();
+        Assert.Equal(12, folders.Count);
+        foreach ((string folder, Dictionary<string, string> profiles) in folders)
         {
+            // Folder and shortcut names become paths in generate.ps1; a '/' would silently nest.
+            Assert.All(profiles.Keys.Append(folder),
+                name => Assert.Equal(-1, name.IndexOfAny(Path.GetInvalidFileNameChars())));
             Assert.Equal(13, profiles.Count);
             Assert.Equal(4, profiles.Keys.Count(n => n.StartsWith("Perf boost")));
             Assert.Equal(4, profiles.Keys.Count(n => n.StartsWith("Power cut, same perf")));

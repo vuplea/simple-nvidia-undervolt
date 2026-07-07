@@ -1,5 +1,5 @@
 <#
-Generates the per-generation profile shortcut tree from profiles.json (the source of truth for
+Generates the per-card-range profile shortcut tree from profiles.json (the source of truth for
 the profile values; PROFILES.md documents them and must be kept in step by hand). The publish
 workflow runs this to build the release's profiles zip; a local run writes to profiles/out.
 

@@ -1,5 +1,20 @@
 {
-  "GTX 10 series (Pascal)": {
+  "GTX 10 series (Pascal, GDDR5) - 1050, 1050 Ti, 1060, 1070, 1070 Ti": {
+    "Perf boost - 1 low risk": "--mv 1000 --mem-pct 5",
+    "Perf boost - 2 moderate risk": "--mv 1000 --mhz-pct 3 --mem-pct 8 --peak-mv 1050",
+    "Perf boost - 3 high risk": "--mv 1000 --mhz-pct 5 --mem-pct 10 --peak-mv 1050",
+    "Perf boost - 4 very high risk": "--mv 1000 --mhz-pct 8 --mem-pct 12 --peak-mv 1050",
+    "Power cut, same perf - 1 low risk": "--mv 925",
+    "Power cut, same perf - 2 moderate risk": "--mv 900",
+    "Power cut, same perf - 3 high risk": "--mv 875 --mhz-pct -2 --peak-mv 1050",
+    "Power cut, same perf - 4 very high risk": "--mv 850 --mhz-pct -2 --peak-mv 1050",
+    "Deep power cut - 1 low risk": "--mv 900",
+    "Deep power cut - 2 moderate risk": "--mv 875",
+    "Deep power cut - 3 high risk": "--mv 850",
+    "Deep power cut - 4 very high risk": "--mv 825",
+    "Reset to stock": "clear"
+  },
+  "GTX 10 series (Pascal, GDDR5X) - 1080, 1080 Ti": {
     "Perf boost - 1 low risk": "--mv 1000 --mem-pct 3",
     "Perf boost - 2 moderate risk": "--mv 1000 --mhz-pct 3 --mem-pct 5 --peak-mv 1050",
     "Perf boost - 3 high risk": "--mv 1000 --mhz-pct 5 --mem-pct 6 --peak-mv 1050",
@@ -14,7 +29,37 @@
     "Deep power cut - 4 very high risk": "--mv 825",
     "Reset to stock": "clear"
   },
-  "RTX 20 series (Turing)": {
+  "GTX 16 series (Turing, GDDR5) - 1630, 1650, 1660": {
+    "Perf boost - 1 low risk": "--mv 1030 --mem-pct 4",
+    "Perf boost - 2 moderate risk": "--mv 1030 --mhz-pct 3 --mem-pct 6 --peak-mv 1030",
+    "Perf boost - 3 high risk": "--mv 1030 --mhz-pct 5 --mem-pct 7 --peak-mv 1030",
+    "Perf boost - 4 very high risk": "--mv 1030 --mhz-pct 8 --mem-pct 8 --peak-mv 1030",
+    "Power cut, same perf - 1 low risk": "--mv 925",
+    "Power cut, same perf - 2 moderate risk": "--mv 900",
+    "Power cut, same perf - 3 high risk": "--mv 875 --mhz-pct -5 --peak-mv 1030",
+    "Power cut, same perf - 4 very high risk": "--mv 850 --mhz-pct -5 --peak-mv 1030",
+    "Deep power cut - 1 low risk": "--mv 900",
+    "Deep power cut - 2 moderate risk": "--mv 875",
+    "Deep power cut - 3 high risk": "--mv 850",
+    "Deep power cut - 4 very high risk": "--mv 825",
+    "Reset to stock": "clear"
+  },
+  "GTX 16 series (Turing, GDDR6) - 1650 GDDR6, 1650 Super, 1660 Super, 1660 Ti": {
+    "Perf boost - 1 low risk": "--mv 1030 --mem-pct 8",
+    "Perf boost - 2 moderate risk": "--mv 1030 --mhz-pct 3 --mem-pct 12 --peak-mv 1030",
+    "Perf boost - 3 high risk": "--mv 1030 --mhz-pct 5 --mem-pct 16 --peak-mv 1030",
+    "Perf boost - 4 very high risk": "--mv 1030 --mhz-pct 8 --mem-pct 20 --peak-mv 1030",
+    "Power cut, same perf - 1 low risk": "--mv 925",
+    "Power cut, same perf - 2 moderate risk": "--mv 900",
+    "Power cut, same perf - 3 high risk": "--mv 875 --mhz-pct -5 --peak-mv 1030",
+    "Power cut, same perf - 4 very high risk": "--mv 850 --mhz-pct -5 --peak-mv 1030",
+    "Deep power cut - 1 low risk": "--mv 900",
+    "Deep power cut - 2 moderate risk": "--mv 875",
+    "Deep power cut - 3 high risk": "--mv 850",
+    "Deep power cut - 4 very high risk": "--mv 825",
+    "Reset to stock": "clear"
+  },
+  "RTX 20 series (Turing) - 2060, 2070, 2080, 2080 Ti": {
     "Perf boost - 1 low risk": "--mv 1030 --mem-pct 5",
     "Perf boost - 2 moderate risk": "--mv 1030 --mhz-pct 3 --mem-pct 6 --peak-mv 1030",
     "Perf boost - 3 high risk": "--mv 1030 --mhz-pct 5 --mem-pct 8 --peak-mv 1030",
@@ -29,7 +74,22 @@
     "Deep power cut - 4 very high risk": "--mv 825",
     "Reset to stock": "clear"
   },
-  "RTX 30 series (Ampere)": {
+  "RTX 30 series (Ampere, GDDR6) - 3050, 3060, 3060 Ti GDDR6, 3070": {
+    "Perf boost - 1 low risk": "--mv 1050 --mem-pct 10",
+    "Perf boost - 2 moderate risk": "--mv 1050 --mhz-pct 3 --mem-pct 12 --peak-mv 1050",
+    "Perf boost - 3 high risk": "--mv 1050 --mhz-pct 4 --mem-pct 14 --peak-mv 1050",
+    "Perf boost - 4 very high risk": "--mv 1050 --mhz-pct 5 --mem-pct 16 --peak-mv 1050",
+    "Power cut, same perf - 1 low risk": "--mv 925",
+    "Power cut, same perf - 2 moderate risk": "--mv 900",
+    "Power cut, same perf - 3 high risk": "--mv 875 --mhz-pct -3 --peak-mv 1050",
+    "Power cut, same perf - 4 very high risk": "--mv 850 --mhz-pct -3 --peak-mv 1050",
+    "Deep power cut - 1 low risk": "--mv 900",
+    "Deep power cut - 2 moderate risk": "--mv 875",
+    "Deep power cut - 3 high risk": "--mv 850",
+    "Deep power cut - 4 very high risk": "--mv 825",
+    "Reset to stock": "clear"
+  },
+  "RTX 30 series (Ampere, GDDR6X) - 3060 Ti GDDR6X, 3070 Ti, 3080": {
     "Perf boost - 1 low risk": "--mv 1050 --mem-pct 5",
     "Perf boost - 2 moderate risk": "--mv 1050 --mhz-pct 3 --mem-pct 6 --peak-mv 1050",
     "Perf boost - 3 high risk": "--mv 1050 --mhz-pct 4 --mem-pct 7 --peak-mv 1050",
@@ -44,7 +104,37 @@
     "Deep power cut - 4 very high risk": "--mv 825",
     "Reset to stock": "clear"
   },
-  "RTX 40 series (Ada)": {
+  "RTX 30 series (Ampere, GDDR6X flagship) - 3080 Ti, 3090, 3090 Ti": {
+    "Perf boost - 1 low risk": "--mv 1050 --mem-pct 3",
+    "Perf boost - 2 moderate risk": "--mv 1050 --mhz-pct 3 --mem-pct 4 --peak-mv 1050",
+    "Perf boost - 3 high risk": "--mv 1050 --mhz-pct 4 --mem-pct 5 --peak-mv 1050",
+    "Perf boost - 4 very high risk": "--mv 1050 --mhz-pct 5 --mem-pct 6 --peak-mv 1050",
+    "Power cut, same perf - 1 low risk": "--mv 900",
+    "Power cut, same perf - 2 moderate risk": "--mv 875",
+    "Power cut, same perf - 3 high risk": "--mv 850 --mhz-pct -3 --peak-mv 1050",
+    "Power cut, same perf - 4 very high risk": "--mv 825 --mhz-pct -3 --peak-mv 1050",
+    "Deep power cut - 1 low risk": "--mv 875",
+    "Deep power cut - 2 moderate risk": "--mv 850",
+    "Deep power cut - 3 high risk": "--mv 825",
+    "Deep power cut - 4 very high risk": "--mv 800",
+    "Reset to stock": "clear"
+  },
+  "RTX 40 series (Ada, GDDR6 128-bit) - 4060, 4060 Ti": {
+    "Perf boost - 1 low risk": "--mv 1050 --mem-pct 11",
+    "Perf boost - 2 moderate risk": "--mv 1050 --mhz-pct 3 --mem-pct 13 --peak-mv 1050",
+    "Perf boost - 3 high risk": "--mv 1050 --mhz-pct 6 --mem-pct 15 --peak-mv 1050",
+    "Perf boost - 4 very high risk": "--mv 1050 --mhz-pct 8 --mem-pct 17 --peak-mv 1050",
+    "Power cut, same perf - 1 low risk": "--mv 975",
+    "Power cut, same perf - 2 moderate risk": "--mv 950",
+    "Power cut, same perf - 3 high risk": "--mv 925 --mhz-pct -5 --peak-mv 1050",
+    "Power cut, same perf - 4 very high risk": "--mv 900 --mhz-pct -5 --peak-mv 1050",
+    "Deep power cut - 1 low risk": "--mv 925",
+    "Deep power cut - 2 moderate risk": "--mv 900",
+    "Deep power cut - 3 high risk": "--mv 885",
+    "Deep power cut - 4 very high risk": "--mv 875",
+    "Reset to stock": "clear"
+  },
+  "RTX 40 series (Ada) - 4070, 4070 Ti, 4080, 4090": {
     "Perf boost - 1 low risk": "--mv 1050 --mem-pct 5",
     "Perf boost - 2 moderate risk": "--mv 1050 --mhz-pct 3 --mem-pct 6 --peak-mv 1050",
     "Perf boost - 3 high risk": "--mv 1050 --mhz-pct 6 --mem-pct 8 --peak-mv 1050",
@@ -59,7 +149,22 @@
     "Deep power cut - 4 very high risk": "--mv 850",
     "Reset to stock": "clear"
   },
-  "RTX 50 series (Blackwell)": {
+  "RTX 50 series (Blackwell, GDDR6) - 5050 8GB": {
+    "Perf boost - 1 low risk": "--mv 1040 --mem-pct 9",
+    "Perf boost - 2 moderate risk": "--mv 1040 --mhz-pct 3 --mem-pct 11 --peak-mv 1040",
+    "Perf boost - 3 high risk": "--mv 1040 --mhz-pct 7 --mem-pct 13 --peak-mv 1040",
+    "Perf boost - 4 very high risk": "--mv 1040 --mhz-pct 10 --mem-pct 15 --peak-mv 1040",
+    "Power cut, same perf - 1 low risk": "--mv 975",
+    "Power cut, same perf - 2 moderate risk": "--mv 950",
+    "Power cut, same perf - 3 high risk": "--mv 925 --mhz-pct -1 --peak-mv 1040",
+    "Power cut, same perf - 4 very high risk": "--mv 900 --mhz-pct -1 --peak-mv 1040",
+    "Deep power cut - 1 low risk": "--mv 925",
+    "Deep power cut - 2 moderate risk": "--mv 900",
+    "Deep power cut - 3 high risk": "--mv 875",
+    "Deep power cut - 4 very high risk": "--mv 850",
+    "Reset to stock": "clear"
+  },
+  "RTX 50 series (Blackwell, GDDR7) - 5060, 5070, 5080, 5090": {
     "Perf boost - 1 low risk": "--mv 1040 --mem-pct 5",
     "Perf boost - 2 moderate risk": "--mv 1040 --mhz-pct 3 --mem-pct 6 --peak-mv 1040",
     "Perf boost - 3 high risk": "--mv 1040 --mhz-pct 7 --mem-pct 8 --peak-mv 1040",

@@ -68,6 +68,20 @@ def curve_y(x):
     return Y0 + (YC - Y0) * t ** 1.6
 
 
+def pinstripe_layers(x, y, fy, yc, below,
+                     offsets=(0.16, 0.35, 0.56, 0.80, 1.06),
+                     width=(0.016, 0.004)):
+    """Pinstripes that relax toward horizontal with depth: the mark morphs
+    from capped curve at the top to a calm flat baseline below.
+    Yields (index, line alpha map); the caller picks colors and opacity."""
+    for i, off in enumerate(offsets):
+        relax = (i + 1) / (len(offsets) + 1)
+        shape = fy * (1 - relax) + yc * relax
+        swell = 0.028 * np.sin(x * 1.8 + i * 1.4) * relax
+        sd = np.abs(y - (shape - off) + swell)
+        yield i, smoothstep(width[0], width[1], sd) * below
+
+
 BADGE_GREEN = np.array([0.086, 0.64, 0.30])
 BADGE_C = 0.52                      # badge center at (+C, -C): bottom-right
 BADGE_R = 0.46
@@ -112,16 +126,8 @@ def render(badge=False):
     # faint fill so the stripes sit in a body of tone, not a void
     col = col + GREEN[None, None, :] * (below * np.exp(dyc * 1.6) * 0.22)[..., None]
 
-    # five pinstripes that relax toward horizontal with depth: the mark morphs
-    # from capped curve at the top to a calm flat baseline below
-    offsets = [0.16, 0.35, 0.56, 0.80, 1.06]
-    for i, off in enumerate(offsets):
-        relax = (i + 1) / (len(offsets) + 1)            # 0 -> curve, 1 -> flat
-        shape = fy * (1 - relax) + YC * relax
-        swell = 0.028 * np.sin(x * 1.8 + i * 1.4) * relax
-        sd = np.abs(y - (shape - off) + swell)
+    for i, line in pinstripe_layers(x, y, fy, YC, below):
         alpha = 0.62 * (0.80 ** i)                       # fade with depth
-        line = smoothstep(0.016, 0.004, sd) * below
         col = over(col, (GREEN * (0.9 - 0.09 * i))[None, None, :], line * alpha)
 
     # the curve itself: broad green bloom, lime glow, white-hot core

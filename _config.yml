@@ -1,8 +1,19 @@
 title: simple-nvidia-undervolt
+tagline: Overclock & undervolt NVIDIA GPUs from the Windows command line
 description: >-
-  Command-line NVIDIA GPU undervolting for Windows — a lightweight MSI
-  Afterburner alternative. Caps voltage by flattening the V/F curve,
-  no background process. Tested on RTX 5090 (Blackwell).
+  Overclock or undervolt your NVIDIA GPU from the Windows command line — a
+  lightweight MSI Afterburner alternative. Caps voltage by flattening the
+  V/F curve, no background process. Tested on RTX 5090 (Blackwell).
+url: https://vuplea.github.io
+baseurl: /simple-nvidia-undervolt
+lang: en
+logo: /assets/icon.png
 theme: jekyll-theme-slate
 plugins:
   - jekyll-seo-tag
+  - jekyll-sitemap
+defaults:
+  - scope:
+      path: ""
+    values:
+      image: /assets/social-preview.png

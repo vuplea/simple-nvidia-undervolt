@@ -9,3 +9,6 @@ profiles/out/
 .idea/
 *.user
 *.suo
+
+# Python (assets render scripts)
+__pycache__/
