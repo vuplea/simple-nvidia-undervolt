@@ -62,12 +62,22 @@ public class ReferenceCurveTests
     }
 
     [Fact]
-    public void Identity_MissingSerialOnEitherSide_StillMatches()
+    public void Identity_MissingSerialOnOneSideOnly_DoesNotMatch()
     {
-        // The serial is best-effort (a driver update may stop reporting it) - it only
-        // discriminates when both sides have one.
-        Assert.True(Card.Matches(Card with { BoardSerial = null }));
-        Assert.True((Card with { BoardSerial = null }).Matches(Card));
+        // A serial on one side and none on the other could be another unit of the same model whose
+        // driver reports no serial. The curve is per-chip, so that pairing must not be accepted -
+        // rejecting it only falls back to a live read.
+        Assert.False(Card.Matches(Card with { BoardSerial = null }));
+        Assert.False((Card with { BoardSerial = null }).Matches(Card));
+    }
+
+    [Fact]
+    public void Identity_NoSerialOnEitherSide_MatchesOnModelAlone()
+    {
+        // Nothing left to discriminate with on boards the driver reports no serial for.
+        var noSerial = Card with { BoardSerial = null };
+
+        Assert.True(noSerial.Matches(noSerial with { }));
     }
 
     [Fact]

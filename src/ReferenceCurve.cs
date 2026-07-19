@@ -18,11 +18,16 @@ internal sealed record GpuIdentity(string Name, string PciIds, string? BoardSeri
             NvApi.TryGetBoardSerial(gpu));
     }
 
-    /// <summary>Whether both identities describe the same card. The serial is best-effort (a driver
-    /// update may stop reporting it), so it only discriminates when both sides have one.</summary>
+    /// <summary>Whether both identities describe the same card — the model and PCI identifiers, plus
+    /// the board serial, which must agree exactly: a serial on one side and none on the other is not
+    /// a match. The stock curve is per-chip, so accepting that pairing would plan another unit's
+    /// binning onto this one, and nothing downstream would catch it (the post-write check verifies
+    /// that the write landed, not that the curve was the right one). Being strict costs nothing when
+    /// it is wrong — the run falls back to a live read, which is what it would do with no reference
+    /// saved at all — so the only card the serial can't discriminate is one whose driver reports no
+    /// serial on either side.</summary>
     public bool Matches(GpuIdentity other)
-        => Name == other.Name && PciIds == other.PciIds
-           && (BoardSerial is null || other.BoardSerial is null || BoardSerial == other.BoardSerial);
+        => Name == other.Name && PciIds == other.PciIds && BoardSerial == other.BoardSerial;
 }
 
 /// <summary>
@@ -85,7 +90,8 @@ internal static class ReferenceCurve
         /// <summary>Saved data exists but doesn't read back as a valid reference.</summary>
         Unreadable,
 
-        /// <summary>The identity key doesn't match the live GPU.</summary>
+        /// <summary>The identity key doesn't match the live GPU — another card, or one whose board
+        /// serial no longer reads the same.</summary>
         DifferentHardware,
 
         /// <summary>The identity matches but the live curve's anchor voltages moved — a driver or
@@ -137,7 +143,7 @@ internal static class ReferenceCurve
     private static string Complaint(State state) => state switch
     {
         State.Unreadable => "the saved reference curve is unreadable",
-        State.DifferentHardware => "the saved reference curve is from different GPU hardware",
+        State.DifferentHardware => "the saved reference curve doesn't match this GPU's identity",
         State.DifferentAnchors => "the saved reference curve no longer matches this GPU's curve "
                                   + "anchors (driver or vBIOS change?)",
         _ => "the saved reference curve couldn't be verified against this GPU",

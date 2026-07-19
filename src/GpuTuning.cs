@@ -87,6 +87,18 @@ internal static class GpuTuning
         return ReadUntilFreqsReadable(gpu);
     }
 
+    /// <summary>Resets to stock and returns the live curve a reference-planned real run verifies its
+    /// write against. The plan itself comes from the saved reference, but the write must still be
+    /// checked against the card's own curve — that check is the only guard against control-table
+    /// offsets that don't fit this GPU — so a read that never comes clean stops the run here rather
+    /// than let it write unverifiably, exactly as an unreadable stock read stops a live-planned run
+    /// in <see cref="BuildCurvePlan"/>.</summary>
+    public static IReadOnlyList<(int Mv, int Mhz)> ResetAndReadVerificationBaseline(IntPtr gpu)
+    {
+        Clear(gpu);
+        return ReadStockOrThrow(gpu);
+    }
+
     /// <summary>The stock curve a dry run plans from, recovered read-only (live minus applied deltas).
     /// On a tuned card the driver re-shapes the effective curve it reports (bin snapping, thermal
     /// shift, smoothing around the flatten's cliff), so the recovery can stay distorted for as long as
@@ -601,7 +613,8 @@ internal static class GpuTuning
             return new[] { $"Curve: unreadable, can't confirm the write ({ex.Message}); verify with 'status'." };
         }
 
-        if (VerifyWriteReachedCurve(plan, effective, referenceBaseline) == WriteVerification.NotReflected)
+        WriteVerification verdict = VerifyWriteReachedCurve(plan, effective, referenceBaseline);
+        if (verdict == WriteVerification.NotReflected)
         {
             // Undo the wrong write. Our zero-write hits the same reserved bytes the delta write did, and
             // the real delta field was never touched, so stock is restored either way. The mismatch is
@@ -615,7 +628,8 @@ internal static class GpuTuning
                 + $"- {reverted}. {PortingDocPointer}");
         }
 
-        return DescribeRealizedCap(effective, plan, targetMhz, planFromReference: referenceBaseline is not null);
+        return DescribeRealizedCap(effective, plan, targetMhz, verdict,
+            planFromReference: referenceBaseline is not null);
     }
 
     /// <summary>Whether the effective read-back reflects a curve write (see <see cref="VerifyWriteReachedCurve"/>).</summary>
@@ -760,9 +774,9 @@ internal static class GpuTuning
     /// thermal offset from the reference, so its note names that instead of a smoothing failure.</summary>
     private static IReadOnlyList<string> DescribeRealizedCap(
         IReadOnlyList<(int Mv, int Mhz)> effective, CurvePlan plan, int? targetMhz,
-        bool planFromReference)
+        WriteVerification verdict, bool planFromReference)
     {
-        // The write itself is already verified (see ConfirmWrite); this only reports the realized clock,
+        // The verdict on the write is already in (see ConfirmWrite); this reports the realized clock,
         // which lives in the live frequency column. If that column reads collapsed (usually a power-state
         // change mid-apply), the numbers would be meaningless and an explicit target would look "not
         // reached", so skip the readout rather than print a misleading cap.
@@ -772,7 +786,13 @@ internal static class GpuTuning
                            + "mid-apply)." };
         }
 
-        string line = $"Confirming curve point: {cap.Mv} mV / {cap.Mhz} MHz";
+        // Only a confirmed verdict may read as one: a plan with nothing measurable to check (a pure
+        // overclock, or a cap whose every reduction is sub-bin) reports the realized point without
+        // claiming the write was verified against the curve.
+        string line = verdict == WriteVerification.Confirmed
+            ? $"Confirming curve point: {cap.Mv} mV / {cap.Mhz} MHz"
+            : $"Curve point: {cap.Mv} mV / {cap.Mhz} MHz (no measurable reduction to verify the "
+              + "write against)";
         if (targetMhz is { } f)
         {
             if (Math.Abs(plan.CapMhz - f) > CurveBinMhz)

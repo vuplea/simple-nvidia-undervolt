@@ -363,6 +363,7 @@ internal static class Cli
     private static void RunSaveReference(IntPtr gpu)
     {
         Console.WriteLine($"Saving the reference curve for {NvApi.SafeFullName(gpu)}:");
+        WarnIfNotElevated();
 
         // Read the identity before the capture: the capture can reset the tuning and fail to put it
         // back, and a later step throwing must not be how the user finds out - it would report the
@@ -455,7 +456,7 @@ internal static class Cli
                     // exposes is kept as the write-verification baseline: the plan's frequencies come
                     // from the reference, so judging the read-back against them would let the thermal
                     // shift between the two pass for a landed write (see VerifyWriteReachedCurve).
-                    referenceBaseline = GpuTuning.ResetAndReadStock(gpu);
+                    referenceBaseline = GpuTuning.ResetAndReadVerificationBaseline(gpu);
                 }
             }
             else

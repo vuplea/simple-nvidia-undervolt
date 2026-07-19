@@ -36,17 +36,23 @@ public sealed class ReferenceCurveTests
     {
         WithNoReference(() =>
         {
-            var (tuneExit, _) = App.RunUndervolt("--mv", "900");
+            // Tune the memory too: the snapshot recovers that offset from the absolute P0 clock minus
+            // the factory base (see AppliedTuning.MemoryDelta), which is the subtlest part of the
+            // round-trip and the one a curve-only assertion would miss.
+            var (tuneExit, _) = App.RunUndervolt("--mv", "900", "--mem-offset", "100");
             Assert.Equal(0, tuneExit);
-            int[] applied = GpuTuning.CurveDeltasKhz(_gpu.Gpu);
-            Assert.Contains(applied, d => d != 0);
+            int[] appliedDeltas = GpuTuning.CurveDeltasKhz(_gpu.Gpu);
+            int appliedMemoryKhz = ReadMemoryClockKhz();
+            Assert.Contains(appliedDeltas, d => d != 0);
 
             var (exitCode, output) = SaveReference();
 
             Assert.Equal(0, exitCode);
             Assert.Contains("A tuning is applied", output);
             Assert.Contains("Previous tuning restored.", output);
-            Assert.Equal(applied, GpuTuning.CurveDeltasKhz(_gpu.Gpu)); // byte-for-byte the same tuning
+            Assert.Equal(appliedDeltas, GpuTuning.CurveDeltasKhz(_gpu.Gpu)); // the same tuning, exactly
+            Assert.Equal(appliedMemoryKhz, ReadMemoryClockKhz());
+            Assert.Equal(0u, NvApi.GetCoreVoltageBoostPercent(_gpu.Gpu));
         });
     }
 
@@ -96,9 +102,17 @@ public sealed class ReferenceCurveTests
             var (exitCode, output) = App.RunUndervolt("--mv", "900");
 
             Assert.Equal(0, exitCode);
-            Assert.Contains("different GPU hardware", output);
+            Assert.Contains("doesn't match this GPU's identity", output);
             App.AssertWriteConfirmed(output);
         });
+    }
+
+    /// <summary>The absolute P0 memory clock, which moves with an applied memory offset.</summary>
+    private int ReadMemoryClockKhz()
+    {
+        Reading<int> clock = TuningSnapshot.Read(_gpu.Gpu).MemoryClockKhz;
+        Assert.True(clock.Ok, clock.Error);
+        return clock.Value;
     }
 
     /// <summary>Runs <c>save-reference</c>, skipping the test on a transitional curve read.</summary>
