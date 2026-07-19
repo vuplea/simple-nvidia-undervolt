@@ -13,11 +13,28 @@ internal static class App
         return (exitCode, error.Length == 0 ? output : $"{output}\n{error}");
     }
 
+    /// <summary>Runs <c>tune</c> with the given tuning flags, never persisting, and skips the test
+    /// when the curve didn't read back cleanly (a brief transitional state).</summary>
+    public static (int ExitCode, string Output) RunUndervolt(params string[] tuning)
+    {
+        var (exitCode, output) = Run(null, tuning.Append("--no-persist").Prepend("tune").ToArray());
+        SkipIfCurveTransient(output);
+        return (exitCode, output);
+    }
+
     /// <summary>Skips the calling test when the run was rejected because the V/F curve read back
     /// collapsed — a brief power-state transition, so a retry condition rather than a failure.</summary>
     public static void SkipIfCurveTransient(string output)
         => Skip.If(output.Contains(GpuTuning.TransientReadMarker),
             "the curve didn't read back cleanly (a brief transitional state), so the run was rejected - retry.");
+
+    /// <summary>Asserts the run verified its write against the effective curve: the confirmation printed
+    /// and the "offsets don't match / reverted" path was not taken.</summary>
+    public static void AssertWriteConfirmed(string output)
+    {
+        Assert.Contains("Confirming curve point", output);
+        Assert.DoesNotContain("didn't change after writing", output);
+    }
 
     /// <summary>The built executable, found by walking up from the test output to the repo's src/bin.</summary>
     public static string ExePath()

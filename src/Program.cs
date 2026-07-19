@@ -186,8 +186,8 @@ internal static class Cli
         return RunWriteCommand(args, isRelayChild, RunClear);
     }
 
-    /// <summary>A write command whose only option is <c>--no-elevate</c> (install, clear); tune owns a
-    /// richer option set and calls the overload below itself.</summary>
+    /// <summary>A write command whose only option is <c>--no-elevate</c> (install, clear,
+    /// save-reference); tune owns a richer option set and calls the overload below itself.</summary>
     private static int RunWriteCommand(string[] args, bool isRelayChild, Action run)
         => RunWriteCommand(args, isRelayChild,
             Args.Global.WithBare("--no-elevate").Parse(args).Has("--no-elevate"), run);
@@ -363,20 +363,34 @@ internal static class Cli
     private static void RunSaveReference(IntPtr gpu)
     {
         Console.WriteLine($"Saving the reference curve for {NvApi.SafeFullName(gpu)}:");
+
+        // Read the identity before the capture: the capture can reset the tuning and fail to put it
+        // back, and a later step throwing must not be how the user finds out - it would report the
+        // registry or identity error alone and never mention the tuning it lost.
+        GpuIdentity identity = GpuIdentity.Read(gpu);
         GpuTuning.ReferenceCapture capture = GpuTuning.CaptureStockForReference(gpu);
         PrintIndented(capture.Log);
-        int? tempC = TryReadTemperatureC(gpu);
-        ReferenceCurve.Save(GpuIdentity.Read(gpu), capture.Stock, tempC);
-        Console.WriteLine($"  Saved {capture.Stock.Count} stock points"
-                          + $"{(tempC is { } t ? $", captured at {t} C" : string.Empty)}.");
-        Console.WriteLine("  Tuning now plans from this curve; re-run 'save-reference' to refresh it.");
+
+        try
+        {
+            int? tempC = TryReadTemperatureC(gpu);
+            ReferenceCurve.Save(identity, capture.Stock, tempC);
+            Console.WriteLine($"  Saved {capture.Stock.Count} stock points"
+                              + $"{(tempC is { } t ? $", captured at {t} C" : string.Empty)}.");
+            Console.WriteLine("  Tuning now plans from this curve; re-run 'save-reference' to refresh it.");
+        }
+        catch (Exception ex) when (capture.RestoreFailure is not null)
+        {
+            throw new CliError($"{ErrorReporter.Describe(ex)}\nAlso, {capture.RestoreFailure}. "
+                               + "Re-run your tune command or profile shortcut.");
+        }
 
         // The reference itself is good (it is stock data, unaffected by the restore), so it stays
         // saved - but the run must still fail loudly: the user's tuning is no longer applied.
         if (capture.RestoreFailure is { } failure)
         {
-            throw new CliError($"The reference was saved, but restoring the previous tuning failed: "
-                + $"{failure}\nThe GPU is reset to stock - re-run your tune command or profile shortcut.");
+            throw new CliError($"The reference was saved, but {failure}.\n"
+                               + "Re-run your tune command or profile shortcut.");
         }
     }
 
@@ -418,7 +432,7 @@ internal static class Cli
 
         GpuTuning.CurvePlan? plan = null;
         int? targetMhz = null;
-        bool planFromReference = false;
+        IReadOnlyList<(int Mv, int Mhz)>? referenceBaseline = null;
         if (request.Mv.IsSet)
         {
             // Plan from the saved reference curve when one matches this GPU - the live curve shifts
@@ -434,11 +448,14 @@ internal static class Cli
             IReadOnlyList<(int Mv, int Mhz)> stock;
             if (reference.Curve is { } referenceStock)
             {
-                planFromReference = true;
                 stock = referenceStock;
                 if (!request.DryRun)
                 {
-                    GpuTuning.Clear(gpu); // a real run still starts from a fresh stock reset
+                    // A real run still starts from a fresh stock reset. The live curve that reset
+                    // exposes is kept as the write-verification baseline: the plan's frequencies come
+                    // from the reference, so judging the read-back against them would let the thermal
+                    // shift between the two pass for a landed write (see VerifyWriteReachedCurve).
+                    referenceBaseline = GpuTuning.ResetAndReadStock(gpu);
                 }
             }
             else
@@ -476,7 +493,7 @@ internal static class Cli
         {
             PrintIndented(request.DryRun
                 ? GpuTuning.DescribePlan(plan, targetMhz)
-                : GpuTuning.Apply(gpu, plan, targetMhz, memory?.DeltaKhz, planFromReference));
+                : GpuTuning.Apply(gpu, plan, targetMhz, memory?.DeltaKhz, referenceBaseline));
         }
         else if (memory is { } mem)
         {
@@ -612,7 +629,8 @@ internal static class Cli
               --save-shortcut [name]
                                 Drop a .lnk (specify name/path, otherwise auto-generated).
               --dry-run         Compute and print the curve changes without writing.
-              --no-elevate      Disable auto-elevation ('clear' and 'install' accept it too).
+              --no-elevate      Disable auto-elevation ('clear', 'install' and 'save-reference'
+                                accept it too).
 
             Options:
               --silent          No output - and no message box - unless the run fails.

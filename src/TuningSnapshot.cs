@@ -47,17 +47,8 @@ internal sealed class TuningSnapshot
     /// <summary>The absolute P0 memory clock (kHz). Afterburner applies the memory offset here as
     /// the range frequency rather than as a delta, so this value moves with it.</summary>
     private static int ReadMemoryClockKhz(Pstates20InfoV1 info)
-    {
-        foreach (Pstate20ClockEntry entry in GpuTuning.P0Entries(info).Clocks)
-        {
-            if (entry.DomainId == NvApi.CLOCK_DOMAIN_MEMORY)
-            {
-                return (int)entry.Data0; // range-type clock: Data0 is the (min == max) frequency
-            }
-        }
-
-        return 0;
-    }
+        // Range-type clock: Data0 is the (min == max) frequency.
+        => (int)(GpuTuning.P0Clock(info, NvApi.CLOCK_DOMAIN_MEMORY)?.Data0 ?? 0);
 
     // --- Display ---
 

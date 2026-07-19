@@ -149,56 +149,70 @@ internal static class GpuTuning
         {
             "A tuning is applied - resetting to stock for the capture, restoring it after.",
         };
-        Clear(gpu);
 
         IReadOnlyList<(int Mv, int Mhz)> stock;
         try
         {
+            // The reset is inside the guard: it writes three knobs, so one the driver rejects
+            // half-way leaves a partial tuning that must be put back like any other failure.
+            Clear(gpu);
             stock = ReadStockOrThrow(gpu);
         }
         catch (Exception primary)
         {
-            // The capture failed - put the card back as found. The read's own error is the one to
-            // surface; a restore that also fails must not vanish behind it, so the two report
-            // together (with the partial restore cleared back to stock, the safe known state).
-            try
+            // The capture failed - put the card back as found. Its own error is the one to surface;
+            // a restore that also fails must not vanish behind it, so the two report together.
+            if (TryRestore(gpu, applied) is { } restoreFailure)
             {
-                applied.Restore(gpu);
-            }
-            catch (Exception ex)
-            {
-                TryClear(gpu);
-                throw new CliError($"{ErrorReporter.Describe(primary)}\nRestoring the previous "
-                    + $"tuning also failed ({ex.Message}) - the GPU is reset to stock; re-run your "
-                    + "tune command.");
+                throw new CliError($"{ErrorReporter.Describe(primary)}\nAlso, {restoreFailure}.");
             }
 
             throw;
         }
 
+        string? failure = TryRestore(gpu, applied);
+        if (failure is null)
+        {
+            log.Add("Previous tuning restored.");
+        }
+
+        return new(stock, log, failure);
+    }
+
+    /// <summary>Puts a snapshotted tuning back, returning null on success or a description of what
+    /// the card is left holding otherwise. A failed restore falls back to a reset — stock is the safe
+    /// known state — and says whether even that landed, since the caller tells the user what state
+    /// the GPU is in and must not claim a reset that didn't happen.</summary>
+    private static string? TryRestore(IntPtr gpu, AppliedTuning applied)
+    {
         try
         {
             applied.Restore(gpu);
-            log.Add("Previous tuning restored.");
-            return new(stock, log, null);
+            return null;
         }
         catch (Exception ex)
         {
-            TryClear(gpu);
-            return new(stock, log, ErrorReporter.Describe(ex));
+            string failure = $"restoring the previous tuning failed ({ex.Message})";
+            return TryClear(gpu) is { } clearFailure
+                ? $"{failure}, and the reset to stock also failed ({clearFailure}) - the GPU may "
+                  + "hold a partial tuning; run 'clear'"
+                : $"{failure} - the GPU is reset to stock";
         }
     }
 
-    /// <summary>Best-effort reset for paths where a restore already failed: stock is the safe,
-    /// known state, and the failure being handled is the one to report.</summary>
-    private static void TryClear(IntPtr gpu)
+    /// <summary>Resets to stock without throwing, returning null on success or the driver's message.
+    /// For paths already handling a failure: the caller decides whether the reset's own failure is
+    /// worth reporting alongside the one it is recovering from.</summary>
+    private static string? TryClear(IntPtr gpu)
     {
         try
         {
             Clear(gpu);
+            return null;
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            return ex.Message;
         }
     }
 
@@ -260,9 +274,13 @@ internal static class GpuTuning
     /// landed (see <see cref="ConfirmWrite"/>), reverting to stock and throwing if it didn't. Any step
     /// the driver rejects throws too — so the caller persists and reports "done" only on a real,
     /// verified undervolt.
+    /// <paramref name="referenceBaseline"/> marks a run whose plan came from the saved reference
+    /// curve, and carries the live stock curve the reset exposed: the plan's own frequencies were
+    /// measured at the reference's temperature, so both the verification and the realized-cap report
+    /// judge against this baseline instead.
     /// </summary>
     public static IReadOnlyList<string> Apply(IntPtr gpu, CurvePlan plan, int? targetMhz, int? memoryDeltaKhz,
-        bool planFromReference = false)
+        IReadOnlyList<(int Mv, int Mhz)>? referenceBaseline = null)
     {
         if (memoryDeltaKhz is { } delta)
         {
@@ -282,7 +300,7 @@ internal static class GpuTuning
             throw;
         }
 
-        return ConfirmWrite(gpu, plan, targetMhz, planFromReference);
+        return ConfirmWrite(gpu, plan, targetMhz, referenceBaseline);
     }
 
     /// <summary>Writes a memory-only tuning: resets everything to stock first (a real run sets the
@@ -562,7 +580,7 @@ internal static class GpuTuning
     /// isn't there; a read we simply couldn't take is reported but not treated as failure.
     /// </summary>
     private static IReadOnlyList<string> ConfirmWrite(IntPtr gpu, CurvePlan plan, int? targetMhz,
-        bool planFromReference)
+        IReadOnlyList<(int Mv, int Mhz)>? referenceBaseline)
     {
         IReadOnlyList<(int Mv, int Mhz)> effective;
         try
@@ -583,27 +601,21 @@ internal static class GpuTuning
             return new[] { $"Curve: unreadable, can't confirm the write ({ex.Message}); verify with 'status'." };
         }
 
-        if (VerifyWriteReachedCurve(plan, effective) == WriteVerification.NotReflected)
+        if (VerifyWriteReachedCurve(plan, effective, referenceBaseline) == WriteVerification.NotReflected)
         {
             // Undo the wrong write. Our zero-write hits the same reserved bytes the delta write did, and
             // the real delta field was never touched, so stock is restored either way. The mismatch is
             // the primary error - a revert that itself fails must not replace it.
-            string reverted = "reverted to stock";
-            try
-            {
-                Clear(gpu);
-            }
-            catch (Exception ex)
-            {
-                reverted = $"the revert to stock also failed ({ex.Message}), run 'clear'";
-            }
+            string reverted = TryClear(gpu) is { } clearFailure
+                ? $"the revert to stock also failed ({clearFailure}), run 'clear'"
+                : "reverted to stock";
 
             throw new CliError(
                 "The curve didn't change after writing, so the control-table offsets don't match this GPU "
                 + $"- {reverted}. {PortingDocPointer}");
         }
 
-        return DescribeRealizedCap(effective, plan, targetMhz, planFromReference);
+        return DescribeRealizedCap(effective, plan, targetMhz, planFromReference: referenceBaseline is not null);
     }
 
     /// <summary>Whether the effective read-back reflects a curve write (see <see cref="VerifyWriteReachedCurve"/>).</summary>
@@ -632,9 +644,15 @@ internal static class GpuTuning
     /// A plan with no bin-sized reductions (a pure overclock, or a cap so shallow every reduction is
     /// sub-bin) leaves nothing this can assert without fighting the driver's clamping, so it reports
     /// <see cref="WriteVerification.Unverifiable"/>.
+    /// <paramref name="liveStock"/> is the pre-write curve to measure against, for a plan built from
+    /// the saved reference: its own frequencies come from a curve captured at another temperature, and
+    /// judging a read-back against those would let the thermal shift alone pass for a landed write on
+    /// exactly the unported card this exists to catch. Omitted, the plan's own frequencies are the
+    /// baseline — for a plan built from a live read they are that same curve.
     /// </summary>
     internal static WriteVerification VerifyWriteReachedCurve(
-        CurvePlan plan, IReadOnlyList<(int Mv, int Mhz)> effective)
+        CurvePlan plan, IReadOnlyList<(int Mv, int Mhz)> effective,
+        IReadOnlyList<(int Mv, int Mhz)>? liveStock = null)
     {
         // A collapsed (transitional) read-back can't be judged either way: every clock reads far below
         // stock, so each reduction would count as "moved" and a missed write would pass as landed. No
@@ -645,36 +663,42 @@ internal static class GpuTuning
             return WriteVerification.Unverifiable;
         }
 
-        // Judge only reductions of at least one bin: a smaller planned reduction (near the top of a
-        // real curve the anchors sit only 7-8 MHz apart) can never register as moved against the
-        // bin-sized read-back noise, so counting it could only produce a false NotReflected - and a
-        // spurious revert.
-        var reductions = plan.Changes.Where(c => c.NewMhz <= c.OldMhz - CurveBinMhz).ToList();
-        if (reductions.Count == 0)
+        // A baseline that doesn't read cleanly can't be measured against any more than a collapsed
+        // read-back can, so it yields no verdict rather than a judgement on noise.
+        if (liveStock is not null && !CurveFreqsReadable(liveStock))
         {
             return WriteVerification.Unverifiable;
         }
 
-        var effectiveByMv = new Dictionary<int, int>();
-        foreach (var (mv, mhz) in effective)
-        {
-            // Adjacent anchors can truncate to the same millivolt; keep the first. A change that
-            // targeted the second of such a pair is then judged against its same-mV neighbour - close
-            // enough, since the plan treats adjacent anchors near-identically and the verdict is a
-            // majority vote over bin-sized reductions.
-            effectiveByMv.TryAdd(mv, mhz);
-        }
+        Dictionary<int, int>? stockByMv = liveStock is null ? null : ByVoltage(liveStock);
+        Dictionary<int, int> effectiveByMv = ByVoltage(effective);
 
         int checkable = 0, moved = 0;
-        foreach (CurveChange c in reductions)
+        foreach (CurveChange c in plan.Changes)
         {
+            // Judge only reductions of at least one bin: a smaller written delta (near the top of a
+            // real curve the anchors sit only 7-8 MHz apart) can never register as moved against the
+            // bin-sized read-back noise, so counting it could only produce a false NotReflected - and
+            // a spurious revert. The written delta says this independently of which curve the plan
+            // measured from, so a reference-planned run is filtered the same way.
+            if (c.NewDeltaKhz > -CurveBinMhz * 1000)
+            {
+                continue;
+            }
+
+            int stockMhz = c.OldMhz;
+            if (stockByMv is not null && !stockByMv.TryGetValue(c.Mv, out stockMhz))
+            {
+                continue; // the baseline doesn't cover this anchor; can't judge it
+            }
+
             if (!effectiveByMv.TryGetValue(c.Mv, out int realizedMhz))
             {
                 continue; // this anchor isn't in the read-back; can't judge it
             }
 
             checkable++;
-            if (realizedMhz <= c.OldMhz - CurveBinMhz)
+            if (realizedMhz <= stockMhz - CurveBinMhz)
             {
                 moved++;
             }
@@ -696,6 +720,21 @@ internal static class GpuTuning
         }
 
         return moved * 2 >= checkable ? WriteVerification.Confirmed : WriteVerification.Unverifiable;
+    }
+
+    /// <summary>A voltage -> frequency map over a curve, keeping the first of any anchors that truncate
+    /// to the same millivolt: that is the one a plan change at that millivolt targeted. (The plan treats
+    /// adjacent anchors near-identically, so judging against a same-mV neighbour is close enough for the
+    /// majority vote above.)</summary>
+    private static Dictionary<int, int> ByVoltage(IReadOnlyList<(int Mv, int Mhz)> curve)
+    {
+        var byMv = new Dictionary<int, int>();
+        foreach (var (mv, mhz) in curve)
+        {
+            byMv.TryAdd(mv, mhz);
+        }
+
+        return byMv;
     }
 
     /// <summary>The curve's effective cap point: the flat-top clock and the lowest voltage that reaches
@@ -778,5 +817,33 @@ internal static class GpuTuning
         }
 
         return (Array.Empty<Pstate20ClockEntry>(), Array.Empty<Pstate20BaseVoltageEntry>());
+    }
+
+    /// <summary>The P0 clock entry for a domain, or null when the pstate holds none.</summary>
+    internal static Pstate20ClockEntry? P0Clock(Pstates20InfoV1 info, uint domainId)
+    {
+        foreach (Pstate20ClockEntry entry in P0Entries(info).Clocks)
+        {
+            if (entry.DomainId == domainId)
+            {
+                return entry;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>The P0 base-voltage entry for a domain, or null when the pstate holds none.</summary>
+    internal static Pstate20BaseVoltageEntry? P0BaseVoltage(Pstates20InfoV1 info, uint domainId)
+    {
+        foreach (Pstate20BaseVoltageEntry entry in P0Entries(info).BaseVoltages)
+        {
+            if (entry.DomainId == domainId)
+            {
+                return entry;
+            }
+        }
+
+        return null;
     }
 }

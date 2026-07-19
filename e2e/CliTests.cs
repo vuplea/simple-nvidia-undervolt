@@ -32,7 +32,7 @@ public sealed class CliTests
 
         int[] before = CurveDeltasKhz();
 
-        var (exitCode, output) = RunUndervolt("--mv", "925", "--dry-run");
+        var (exitCode, output) = App.RunUndervolt("--mv", "925", "--dry-run");
 
         Assert.Equal(0, exitCode);
         Assert.Contains("[dry run]", output);
@@ -70,7 +70,7 @@ public sealed class CliTests
 
         // A real undervolt needs a clean curve read, so the whole apply (memory included) is rejected
         // (and the test skipped) on a collapsed read.
-        var (exitCode, _) = RunUndervolt("--mv", "925", "--mem-offset", "100");
+        var (exitCode, _) = App.RunUndervolt("--mv", "925", "--mem-offset", "100");
 
         Assert.Equal(0, exitCode);
         TuningSnapshot after = TuningSnapshot.Read(_gpu.Gpu);
@@ -83,11 +83,11 @@ public sealed class CliTests
     {
         Skip.IfNot(_gpu.Available, _gpu.SkipReason);
 
-        var (exitCode, output) = RunUndervolt("--mv", "900");
+        var (exitCode, output) = App.RunUndervolt("--mv", "900");
 
         Assert.Equal(0, exitCode);
         Assert.Contains(CurveDeltasKhz(), d => d != 0);           // the cap flatten wrote per-anchor deltas
-        AssertWriteConfirmed(output);
+        App.AssertWriteConfirmed(output);
     }
 
     // A large change in the safe (reduction) direction: a deep cap, or a clock well below stock, flattens
@@ -102,10 +102,10 @@ public sealed class CliTests
     {
         Skip.IfNot(_gpu.Available, _gpu.SkipReason);
 
-        var (exitCode, output) = RunUndervolt(tuning);
+        var (exitCode, output) = App.RunUndervolt(tuning);
 
         Assert.Equal(0, exitCode);
-        AssertWriteConfirmed(output);
+        App.AssertWriteConfirmed(output);
 
         // The change measurably lowered the curve: the flatten wrote reductions, and the capped top sits
         // well below the stock max (recovered by backing the just-written deltas out of the same read).
@@ -261,24 +261,6 @@ public sealed class CliTests
             Assert.Equal(0, exitCode);
             Assert.Equal(Shortcut.NoIcon, Lnk.ReadIcon(Path.Combine(temp, "Tune 925mV.lnk")));
         });
-    }
-
-    /// <summary>Runs <c>tune</c> with the given tuning flags, never persisting, and skips the test
-    /// when the curve didn't read back cleanly (a brief transitional state).</summary>
-    private static (int ExitCode, string Output) RunUndervolt(params string[] tuning)
-    {
-        string[] args = tuning.Append("--no-persist").Prepend("tune").ToArray();
-        var (exitCode, output) = App.Run(null, args);
-        App.SkipIfCurveTransient(output);
-        return (exitCode, output);
-    }
-
-    /// <summary>Asserts the run verified its write against the effective curve: the confirmation printed and
-    /// the "offsets don't match / reverted" path was not taken.</summary>
-    private static void AssertWriteConfirmed(string output)
-    {
-        Assert.Contains("Confirming curve point", output);
-        Assert.DoesNotContain("didn't change after writing", output);
     }
 
     private int[] CurveDeltasKhz() => GpuTuning.CurveDeltasKhz(_gpu.Gpu);

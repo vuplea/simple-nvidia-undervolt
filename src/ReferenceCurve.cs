@@ -36,7 +36,9 @@ internal sealed record GpuIdentity(string Name, string PciIds, string? BoardSeri
 /// </summary>
 internal static class ReferenceCurve
 {
-    private const string KeyPath = @"SOFTWARE\" + Product.Name + @"\ReferenceCurve";
+    /// <summary>The HKLM key holding the reference. Internal so the e2e suite can back up and restore
+    /// the machine's own reference around tests that overwrite it.</summary>
+    internal const string KeyPath = @"SOFTWARE\" + Product.Name + @"\ReferenceCurve";
 
     /// <summary>A loaded reference: the identity it was captured from, the stock curve, and the
     /// capture conditions (for display, so a stale-looking result can be traced to its capture).</summary>
@@ -145,19 +147,23 @@ internal static class ReferenceCurve
         => $"saved {saved.SavedAt}{(saved.TempC is { } t ? $" at {t} C" : string.Empty)}";
 
     /// <summary>Writes the reference, replacing any previous one. Requires administrator (HKLM);
-    /// the environment refusing the write is reported as the anticipated failure it is.</summary>
+    /// the environment refusing the write is reported as the anticipated failure it is.
+    /// The curve goes in before the identity that keys it, so a write interrupted between the two
+    /// leaves the previous identity guarding the new curve: on the same card that pairing is still
+    /// correct, and on another one it fails the identity check and falls back to a live read. The
+    /// reverse order would leave the new card's identity vouching for the old card's curve.</summary>
     public static void Save(GpuIdentity gpu, IReadOnlyList<(int Mv, int Mhz)> curve, int? tempC)
     {
         try
         {
             using RegistryKey key = Registry.LocalMachine.CreateSubKey(KeyPath, writable: true);
-            key.SetValue("Name", gpu.Name);
-            key.SetValue("PciIds", gpu.PciIds);
-            SetOrDelete(key, "BoardSerial", gpu.BoardSerial);
+            key.SetValue("Points", ToPointLines(curve), RegistryValueKind.MultiString);
             SetOrDelete(key, "TempC", tempC);
             key.SetValue("SavedAt", DateTime.Now.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture));
             key.SetValue("AppVersion", Product.Version);
-            key.SetValue("Points", ToPointLines(curve), RegistryValueKind.MultiString);
+            key.SetValue("Name", gpu.Name);
+            key.SetValue("PciIds", gpu.PciIds);
+            SetOrDelete(key, "BoardSerial", gpu.BoardSerial);
         }
         catch (Exception ex) when (ex is UnauthorizedAccessException or IOException
                                        or System.Security.SecurityException)

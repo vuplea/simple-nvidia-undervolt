@@ -92,14 +92,8 @@ public sealed class GpuFixture : IDisposable
     /// <summary>The P0 graphics-clock delta (kHz) and core base-voltage delta (uV) — the two
     /// <see cref="NvApi.SetPstate0Offsets"/> knobs the memory-delta snapshot doesn't cover.</summary>
     private static (int GraphicsDeltaKhz, int CoreVoltageDeltaUv) ReadPstate0Deltas(Pstates20InfoV1 info)
-    {
-        var (clocks, voltages) = GpuTuning.P0Entries(info);
-        return (
-            clocks.Where(c => c.DomainId == NvApi.CLOCK_DOMAIN_GRAPHICS)
-                .Select(c => c.FreqDeltaKhz.Value).FirstOrDefault(),
-            voltages.Where(v => v.DomainId == NvApi.VOLTAGE_DOMAIN_CORE)
-                .Select(v => v.ValueDeltaUv.Value).FirstOrDefault());
-    }
+        => (GpuTuning.P0Clock(info, NvApi.CLOCK_DOMAIN_GRAPHICS)?.FreqDeltaKhz.Value ?? 0,
+            GpuTuning.P0BaseVoltage(info, NvApi.VOLTAGE_DOMAIN_CORE)?.ValueDeltaUv.Value ?? 0);
 
     private static void TryRestore(Action restore)
     {

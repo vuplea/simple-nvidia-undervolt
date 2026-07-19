@@ -142,6 +142,53 @@ public class CurveWriteVerificationTests
         Assert.Equal(GpuTuning.WriteVerification.Confirmed, GpuTuning.VerifyWriteReachedCurve(plan, effective));
     }
 
+    /// <summary>A curve a bin below another — the shape the live card takes when it is warmer than
+    /// the reference was at capture.</summary>
+    private static List<(int Mv, int Mhz)> ShiftedDown(IReadOnlyList<(int Mv, int Mhz)> curve, int mhz = 20)
+        => curve.Select(p => (p.Mv, p.Mhz - mhz)).ToList();
+
+    [Fact]
+    public void ReferencePlan_WriteThatMissed_IsNotReflected_DespiteTheThermalShift()
+    {
+        // A plan built from the saved reference measures from the curve as captured, while the card
+        // now runs a bin lower. A write that landed nowhere reads back as that live curve - and
+        // against the reference alone every anchor looks "moved", confirming a write that never
+        // happened on exactly the unported card this check exists to catch.
+        var reference = TestCurves.Realistic();
+        var plan = GpuTuning.BuildCurvePlan(reference, capMv: 1000, targetMhz: null, capPoints: 8);
+        var liveStock = ShiftedDown(reference);
+
+        Assert.Equal(GpuTuning.WriteVerification.Confirmed,
+            GpuTuning.VerifyWriteReachedCurve(plan, liveStock));
+        Assert.Equal(GpuTuning.WriteVerification.NotReflected,
+            GpuTuning.VerifyWriteReachedCurve(plan, liveStock, liveStock));
+    }
+
+    [Fact]
+    public void ReferencePlan_WriteThatLanded_IsConfirmed()
+    {
+        // The driver applies the written deltas to the live curve, not to the reference the plan
+        // measured from, so the baseline must be what the read-back is judged against.
+        var reference = TestCurves.Realistic();
+        var plan = GpuTuning.BuildCurvePlan(reference, capMv: 1000, targetMhz: null, capPoints: 8);
+        var liveStock = ShiftedDown(reference);
+
+        Assert.Equal(GpuTuning.WriteVerification.Confirmed,
+            GpuTuning.VerifyWriteReachedCurve(plan, TestCurves.Effective(liveStock, plan.DeltasKhz), liveStock));
+    }
+
+    [Fact]
+    public void ReferencePlan_WithACollapsedBaseline_IsUnverifiable()
+    {
+        // The baseline was read during a power-state transition: no verdict, rather than one built
+        // on a collapsed pre-write curve.
+        var reference = TestCurves.Realistic();
+        var plan = GpuTuning.BuildCurvePlan(reference, capMv: 1000, targetMhz: null, capPoints: 8);
+
+        Assert.Equal(GpuTuning.WriteVerification.Unverifiable, GpuTuning.VerifyWriteReachedCurve(
+            plan, TestCurves.Effective(reference, plan.DeltasKhz), TestCurves.Collapsed()));
+    }
+
     [Fact]
     public void CollapsedReadBack_IsUnverifiable()
     {

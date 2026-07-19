@@ -14,22 +14,12 @@ internal sealed record AppliedTuning(int[] CurveDeltasKhz, int GraphicsDeltaKhz,
 
     public static AppliedTuning Read(IntPtr gpu)
     {
-        var (clocks, baseVoltages) = GpuTuning.P0Entries(NvApi.GetPstates20(gpu));
-        int coreVoltageDeltaUv = 0;
-        foreach (Pstate20BaseVoltageEntry entry in baseVoltages)
-        {
-            if (entry.DomainId == NvApi.VOLTAGE_DOMAIN_CORE)
-            {
-                coreVoltageDeltaUv = entry.ValueDeltaUv.Value;
-                break;
-            }
-        }
-
+        Pstates20InfoV1 info = NvApi.GetPstates20(gpu);
         return new(
             NvApi.GetCurveFreqDeltasKhz(gpu, NvApi.MaxCurveAnchors),
-            GraphicsDelta(clocks),
-            MemoryDelta(gpu, clocks),
-            coreVoltageDeltaUv,
+            GpuTuning.P0Clock(info, NvApi.CLOCK_DOMAIN_GRAPHICS)?.FreqDeltaKhz.Value ?? 0,
+            MemoryDelta(gpu, info),
+            GpuTuning.P0BaseVoltage(info, NvApi.VOLTAGE_DOMAIN_CORE)?.ValueDeltaUv.Value ?? 0,
             NvApi.GetCoreVoltageBoostPercent(gpu));
     }
 
@@ -43,38 +33,22 @@ internal sealed record AppliedTuning(int[] CurveDeltasKhz, int GraphicsDeltaKhz,
         NvApi.SetCoreVoltageBoostPercent(gpu, VoltageBoostPercent);
     }
 
-    private static int GraphicsDelta(IReadOnlyList<Pstate20ClockEntry> clocks)
-    {
-        foreach (Pstate20ClockEntry entry in clocks)
-        {
-            if (entry.DomainId == NvApi.CLOCK_DOMAIN_GRAPHICS)
-            {
-                return entry.FreqDeltaKhz.Value;
-            }
-        }
-
-        return 0;
-    }
-
     /// <summary>The applied memory offset, via the read/write asymmetry documented on
     /// <see cref="NvApi.SetPstate0Offsets"/>: the GET reports the memory clock as an absolute
     /// frequency with the offset folded in, so the delta to write back is measured against the
     /// factory base clock. The entry's own delta field is the fallback when the base is
     /// unavailable.</summary>
-    private static int MemoryDelta(IntPtr gpu, IReadOnlyList<Pstate20ClockEntry> clocks)
+    private static int MemoryDelta(IntPtr gpu, Pstates20InfoV1 info)
     {
-        foreach (Pstate20ClockEntry entry in clocks)
+        if (GpuTuning.P0Clock(info, NvApi.CLOCK_DOMAIN_MEMORY) is not { } entry)
         {
-            if (entry.DomainId == NvApi.CLOCK_DOMAIN_MEMORY)
-            {
-                uint baseKhz = NvApi.GetClockFrequencyKhz(
-                    gpu, NvApi.CLOCK_FREQ_TYPE_BASE, NvApi.CLOCK_DOMAIN_MEMORY);
-                return entry.Data0 > 0 && baseKhz > 0
-                    ? (int)entry.Data0 - (int)baseKhz
-                    : entry.FreqDeltaKhz.Value;
-            }
+            return 0;
         }
 
-        return 0;
+        uint baseKhz = NvApi.GetClockFrequencyKhz(
+            gpu, NvApi.CLOCK_FREQ_TYPE_BASE, NvApi.CLOCK_DOMAIN_MEMORY);
+        return entry.Data0 > 0 && baseKhz > 0
+            ? (int)entry.Data0 - (int)baseKhz
+            : entry.FreqDeltaKhz.Value;
     }
 }
