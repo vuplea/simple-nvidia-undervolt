@@ -68,9 +68,9 @@ public class CurveWriteVerificationTests
     }
 
     [Theory]
-    [InlineData(9, nameof(GpuTuning.WriteVerification.Confirmed))]     // every reduction landed
-    [InlineData(5, nameof(GpuTuning.WriteVerification.Confirmed))]     // a majority landed
-    [InlineData(4, nameof(GpuTuning.WriteVerification.Unverifiable))]  // a mixed minority: wobble, no verdict
+    [InlineData(8, nameof(GpuTuning.WriteVerification.Confirmed))]     // every reduction landed
+    [InlineData(4, nameof(GpuTuning.WriteVerification.Confirmed))]     // the exact majority boundary
+    [InlineData(3, nameof(GpuTuning.WriteVerification.Unverifiable))]  // just under it: wobble, no verdict
     [InlineData(0, nameof(GpuTuning.WriteVerification.NotReflected))]  // nothing moved - the layout-mismatch signature
     public void MovedAnchorCount_DecidesTheVerdict(int movedCount, string expectedVerdict)
     {
@@ -79,7 +79,7 @@ public class CurveWriteVerificationTests
         var expected = Enum.Parse<GpuTuning.WriteVerification>(expectedVerdict);
         var plan = PlainCapPlan(out var stock);
         var reduced = plan.Changes.Where(c => c.NewMhz < c.OldMhz).ToList();
-        Assert.Equal(9, reduced.Count); // capMv 1000 flattens anchors 11..19 down to the cap clock
+        Assert.Equal(8, reduced.Count); // capMv 1000 flattens anchors 12..19 down to the flat clock
 
         var mhz = stock.Select(p => p.Mhz).ToArray();
         for (int i = 0; i < movedCount; i++)
@@ -93,12 +93,12 @@ public class CurveWriteVerificationTests
     [Fact]
     public void PlanWhoseReductionsAreAllSubBin_IsUnverifiable()
     {
-        // Near the top of a real curve the anchors sit only 7-8 MHz apart, so a cap one anchor below
+        // Near the top of a real curve the anchors sit only 7-8 MHz apart, so a cap two anchors below
         // the top plans a single sub-bin reduction. Even a perfectly landed write can't register
         // against the bin-sized noise tolerance, so there is nothing measurable - no verdict, never
         // the revert path (which would misdiagnose a layout mismatch).
         var stock = Enumerable.Range(0, 20).Select(i => (Mv: 800 + i * 20, Mhz: 2000 + i * 8)).ToList();
-        var plan = GpuTuning.BuildCurvePlan(stock, capMv: stock[18].Mv, targetMhz: null, capPoints: 8);
+        var plan = GpuTuning.BuildCurvePlan(stock, capMv: stock[17].Mv, targetMhz: null, capPoints: 8);
         Assert.All(plan.Changes, c => Assert.True(c.OldMhz - c.NewMhz < 15)); // all below the bin
 
         var landed = TestCurves.Effective(stock, plan.DeltasKhz);
@@ -111,8 +111,8 @@ public class CurveWriteVerificationTests
     {
         // No anchor is flattened down, so there is no reliable signal (a raise the driver may clamp).
         var changes = new[] { new GpuTuning.CurveChange(1000, 2500, 2600, 100_000) };
-        var plan = new GpuTuning.CurvePlan(CapMv: 1000, CapMhz: 2600, CapDeltaMhz: 100, changes,
-            DeltasKhz: Array.Empty<int>());
+        var plan = new GpuTuning.CurvePlan(CapMv: 1000, CapMhz: 2600, CapDeltaMhz: 100,
+            FlatMv: 1020, FlatMhz: 2650, changes, DeltasKhz: Array.Empty<int>());
 
         Assert.Equal(GpuTuning.WriteVerification.Unverifiable,
             GpuTuning.VerifyWriteReachedCurve(plan, TestCurves.Realistic()));
@@ -137,7 +137,7 @@ public class CurveWriteVerificationTests
         // clock, which keeps the read monotonic - must not overwrite its realized value.
         var plan = PlainCapPlan(out var stock);
         var effective = TestCurves.Effective(stock, plan.DeltasKhz);
-        effective.AddRange(stock.Where(p => p.Mv >= 1100)); // 5 of the 9 reduced anchors, duplicated
+        effective.AddRange(stock.Where(p => p.Mv >= 1100)); // 5 of the 8 reduced anchors, duplicated
 
         Assert.Equal(GpuTuning.WriteVerification.Confirmed, GpuTuning.VerifyWriteReachedCurve(plan, effective));
     }

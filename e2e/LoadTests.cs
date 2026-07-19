@@ -1,0 +1,140 @@
+using System.Globalization;
+using System.Text.RegularExpressions;
+
+namespace SimpleNvidiaUndervolt.E2E;
+
+/// <summary>
+/// Tests that need the GPU working, not idle: a Playwright-driven WebGL load
+/// (<see cref="GpuLoadFixture"/>) holds the boost algorithm at its operating point, and the tests
+/// assert where that point lands against an applied cap. This is the tool's actual contract — the
+/// flatten is placed so the boost settles on the requested cap point (one 5 mV step below the flat
+/// start), and only a loaded card shows where the boost settles — so these are the only tests that
+/// verify the undervolt does what it says, rather than that the curve write landed.
+/// </summary>
+[Collection(GpuCollection.Name)]
+public sealed class LoadTests : IClassFixture<GpuLoadFixture>
+{
+    private readonly GpuFixture _gpu;
+    private readonly GpuLoadFixture _load;
+
+    public LoadTests(GpuFixture gpu, GpuLoadFixture load)
+    {
+        _gpu = gpu;
+        _load = load;
+    }
+
+    [SkippableFact]
+    public void PlainCapUnderLoad_BoostSettlesOnTheCapPoint()
+    {
+        var (stock, k) = StartLoadedRun();
+        int capMv = stock[k].Mv;
+
+        var (exitCode, output) = App.RunUndervolt("--mv", App.Arg(capMv));
+        Assert.Equal(0, exitCode);
+        App.AssertWriteConfirmed(output);
+
+        var (settleMv, settleMhz) = SampleSettledPointOrSkip();
+        AssertSettledOnTheCap(stock, k, settleMv);
+
+        // ...at the cap point's own clock: at or a hair above the stock clock there (the settle can
+        // sit in a 10 mV anchor gap, interpolating toward the flat start), never up at the flat top
+        // and never fallen down the stock curve below the cap.
+        Assert.InRange(settleMhz, stock[k].Mhz - 25, stock[k + 1].Mhz + 25);
+    }
+
+    [SkippableFact]
+    public void ReducedClockCapUnderLoad_BoostHoldsTheTargetAtTheCap()
+    {
+        var (stock, k) = StartLoadedRun();
+        int capMv = stock[k].Mv;
+        int targetMhz = stock[k].Mhz - 60; // a reduction: meaningful to measure, safe on any card
+
+        var (exitCode, output) = App.RunUndervolt("--mv", App.Arg(capMv), "--mhz", App.Arg(targetMhz));
+        Assert.Equal(0, exitCode);
+        App.AssertWriteConfirmed(output);
+
+        var (settleMv, settleMhz) = SampleSettledPointOrSkip();
+        AssertSettledOnTheCap(stock, k, settleMv);
+
+        // The requested clock is held at the settle point. The flatten-at-the-cap shape fails this
+        // (and the voltage check above): the boost lands one anchor below the cap, a stock-slope
+        // step (~15-25 MHz) under the target.
+        Assert.InRange(settleMhz, targetMhz - 25, targetMhz + (stock[k + 1].Mhz - stock[k].Mhz) + 25);
+    }
+
+    [SkippableFact]
+    public void TelemetryUnderLoad_ReportsARealOperatingPoint()
+    {
+        Skip.IfNot(_gpu.Available, _gpu.SkipReason);
+        _load.SkipUnlessLoading(_gpu.Gpu);
+
+        var (exitCode, output) = App.Run(null, "voltage");
+
+        // The one-shot telemetry line: under load every column is live, so the reading must be a
+        // boost-range operating point, not zeros or "n/a" placeholders.
+        Assert.Equal(0, exitCode);
+        Match m = Regex.Match(output, @"(\d+) mV\s+(\d+) MHz");
+        Assert.True(m.Success, $"no 'NNN mV NNNN MHz' reading in: {output}");
+        Assert.InRange(int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture), 600, 1300);
+        Assert.True(int.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture) >= NvApi.MinBoostClockKhz / 1000,
+            $"clock under load below the boost range: {m.Value}");
+    }
+
+    /// <summary>The shared opening of a settle test: skip without a GPU, bring the load up first
+    /// (so the card is at a working temperature before anything is planned or measured), then read
+    /// the stock curve and pick the cap anchor.</summary>
+    private (IReadOnlyList<(int Mv, int Mhz)> Stock, int CapAnchor) StartLoadedRun()
+    {
+        Skip.IfNot(_gpu.Available, _gpu.SkipReason);
+        _load.SkipUnlessLoading(_gpu.Gpu);
+
+        IReadOnlyList<(int Mv, int Mhz)> stock = StockProbe.ResetAndReadStockOrSkip(_gpu.Gpu);
+        return (stock, StockProbe.PickCapAnchor(stock));
+    }
+
+    /// <summary>Asserts the settled voltage is the cap point: at the cap anchor, or inside the gap
+    /// to the next anchor (a 10 mV anchor gap leaves the boost one 5 mV step below the flat start,
+    /// between the two). A flatten-at-the-cap shape settles one step BELOW the cap, so the lower
+    /// bound is what this test exists for.</summary>
+    private static void AssertSettledOnTheCap(IReadOnlyList<(int Mv, int Mhz)> stock, int k, int settleMv)
+        => Assert.InRange(settleMv, stock[k].Mv - 2, stock[k + 1].Mv - 5 + 2);
+
+    /// <summary>The point the boost settled on: after a warm-up pause, samples the live telemetry
+    /// until one voltage dominates, returning it with its average clock. A power-limited card skips —
+    /// when TGP is pinned, the power governor picks the operating point and the cap's settle
+    /// behavior isn't observable — after one attempt to lighten the load below the limit.</summary>
+    private (int Mv, int Mhz) SampleSettledPointOrSkip()
+    {
+        for (int attempt = 0; ; attempt++)
+        {
+            Thread.Sleep(3000);
+
+            var samples = new List<(int Mv, int Mhz, double Tgp)>();
+            for (int i = 0; i < 10; i++)
+            {
+                var t = Telemetry.Sample(_gpu.Gpu);
+                if (t.VoltageUv is { } uv && t.CoreMhz is { } mhz)
+                {
+                    samples.Add(((int)(uv / 1000), (int)mhz, t.PowerPercent ?? 0));
+                }
+
+                Thread.Sleep(700);
+            }
+
+            Skip.If(samples.Count < 8, "live voltage/clock telemetry is unavailable on this host.");
+
+            if (samples.Average(s => s.Tgp) >= 92)
+            {
+                Skip.If(attempt > 0, "the card is power-limited even under a lightened load - TGP, "
+                                     + "not the voltage cap, picks the operating point here.");
+                _load.HalveIntensity();
+                continue;
+            }
+
+            var modal = samples.GroupBy(s => s.Mv).OrderByDescending(g => g.Count()).First().ToList();
+            Skip.If(modal.Count < samples.Count * 6 / 10,
+                "the operating point never stabilized under load - retry on a quieter system.");
+            return (modal[0].Mv, (int)Math.Round(modal.Average(s => (double)s.Mhz)));
+        }
+    }
+}

@@ -1,3 +1,5 @@
+using System.Globalization;
+
 namespace SimpleNvidiaUndervolt.E2E;
 
 /// <summary>Runs the real built executable (<c>src/bin/simple-nvidia-undervolt.exe</c>) as a process —
@@ -35,6 +37,9 @@ internal static class App
         Assert.Contains("Confirming curve point", output);
         Assert.DoesNotContain("didn't change after writing", output);
     }
+
+    /// <summary>A number as a command-line argument — invariant, like every number this CLI parses.</summary>
+    public static string Arg(int value) => value.ToString(CultureInfo.InvariantCulture);
 
     /// <summary>The built executable, found by walking up from the test output to the repo's src/bin.</summary>
     public static string ExePath()

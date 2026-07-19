@@ -12,3 +12,6 @@ profiles/out/
 
 # Python (assets render scripts)
 __pycache__/
+
+# Playwright MCP session artifacts
+.playwright-mcp/

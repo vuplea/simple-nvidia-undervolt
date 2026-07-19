@@ -141,7 +141,7 @@ operates on.
 
 ## Development
 
-The cap anchor and every point above it are flattened to one frequency through `ClkVfPointsSetControl`;
+Every point above the cap anchor is flattened to one frequency through `ClkVfPointsSetControl`;
 the boost algorithm then pins voltage at the cap. A band of `--cap-points` anchors ending at the cap
 shares the cap's offset, so if the realized voltage settles a bin or two below the cap under load,
 an overclocked cap doesn't fall back down the steep stock curve.

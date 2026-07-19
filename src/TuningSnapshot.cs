@@ -11,9 +11,9 @@ internal sealed class TuningSnapshot
     public required string Name { get; init; }
     public Reading<int[]> CoreCurveOffsetsKhz { get; init; }
 
-    /// <summary>The effective curve's cap point — the flat-top clock and the lowest voltage that
-    /// reaches it — or null when the frequency column didn't read cleanly. Rendered only when curve
-    /// offsets are applied: at stock the curve's top point is not a cap.</summary>
+    /// <summary>The effective curve's cap point — where the boost settles under load, see
+    /// <see cref="GpuTuning.EffectiveCapPoint"/> — or null when the frequency column didn't read
+    /// cleanly. Rendered only when curve offsets are applied: at stock the curve's top is not a cap.</summary>
     public (int Mv, int Mhz)? EffectiveCap { get; init; }
 
     public Reading<int> MemoryClockKhz { get; init; }
