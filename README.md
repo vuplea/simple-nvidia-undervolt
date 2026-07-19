@@ -49,10 +49,11 @@ install               Copy the app to Program Files, so saved or profile shortcu
 status                Show curve offset, memory clock, voltage boost, and logon re-apply.
 watch                 Poll live core voltage/clock/temp/power, tracking the max.
 clear                 Reset all tuning to stock and remove logon re-apply.
+save-reference        Save the stock V/F curve as the tuning reference, for reproducible results.
 ```
 
-`status` and `watch` are read-only and need no elevation. **Tuning, `clear` and `install` need
-administrator rights; if run from a normal terminal they prompt for elevation.**
+`status` and `watch` are read-only and need no elevation. **Tuning, `clear`, `install` and
+`save-reference` need administrator rights; if run from a normal terminal they prompt for elevation.**
 A tuning run re-applies itself at logon by default, so it survives a reboot
 unless you pass `--no-persist`. Low-level NVAPI inspection commands are listed under
 `--help-diagnostics` and in [DEVELOPMENT.md](DEVELOPMENT.md).
@@ -85,9 +86,13 @@ Other:
 The offset/pct forms are relative to the real under-load operating voltage — read it from `watch` under a
 sustained load.
 
-Apply your settings at a consistent GPU temperature — simplest with a cooled-down card. Clock targets
-resolve against the live curve, which shifts slightly with temperature, so applying hot vs. cold bakes
-in a slightly different tuning.
+### Saving a reference curve
+
+By default, tuning resolves against the live curve, which shifts slightly with temperature — so the
+same command applied hot vs. cold bakes in a slightly different tuning. `save-reference` fixes that:
+run it once with the GPU idle and cool to save the stock V/F curve. Tuning then plans from the saved
+curve instead of a live read, so the same command always produces the same result — this enables
+tuning during load.
 
 ### Persisting at startup
 

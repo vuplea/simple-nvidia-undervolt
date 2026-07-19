@@ -118,6 +118,103 @@ internal static class GpuTuning
         return ReadUntilFreqsReadable(gpu);
     }
 
+    /// <summary>The result of a <c>save-reference</c> capture: the stock curve, the log of what was
+    /// done, and — when the applied tuning had to be reset and couldn't be put back — the restore
+    /// failure the caller reports after saving the (still valid) reference.</summary>
+    internal sealed record ReferenceCapture(IReadOnlyList<(int Mv, int Mhz)> Stock,
+        IReadOnlyList<string> Log, string? RestoreFailure);
+
+    /// <summary>The stock curve a <c>save-reference</c> run captures. With a tuning applied the
+    /// true stock curve isn't observable (the driver re-shapes the effective curve around the
+    /// tuning, so the recovered live-minus-deltas curve can stay distorted), and a reference is
+    /// only worth saving when it is the real thing — so the applied state is snapshotted raw, the
+    /// card reset to stock for a direct read, and the identical raw state written back
+    /// (<see cref="AppliedTuning"/>). A capture that fails restores the tuning and throws; a
+    /// restore that fails falls back to stock rather than leave a partial tuning behind.</summary>
+    public static ReferenceCapture CaptureStockForReference(IntPtr gpu)
+    {
+        IReadOnlyList<(int Mv, int Mhz)> curve = NvApi.GetVfCurve(gpu);
+        if (!CurveVoltsPlausible(curve))
+        {
+            throw UnrecognizedCurveError(gpu, "save a reference curve");
+        }
+
+        AppliedTuning applied = AppliedTuning.Read(gpu);
+        if (applied.IsStock)
+        {
+            return new(ReadStockOrThrow(gpu), Array.Empty<string>(), null);
+        }
+
+        var log = new List<string>
+        {
+            "A tuning is applied - resetting to stock for the capture, restoring it after.",
+        };
+        Clear(gpu);
+
+        IReadOnlyList<(int Mv, int Mhz)> stock;
+        try
+        {
+            stock = ReadStockOrThrow(gpu);
+        }
+        catch (Exception primary)
+        {
+            // The capture failed - put the card back as found. The read's own error is the one to
+            // surface; a restore that also fails must not vanish behind it, so the two report
+            // together (with the partial restore cleared back to stock, the safe known state).
+            try
+            {
+                applied.Restore(gpu);
+            }
+            catch (Exception ex)
+            {
+                TryClear(gpu);
+                throw new CliError($"{ErrorReporter.Describe(primary)}\nRestoring the previous "
+                    + $"tuning also failed ({ex.Message}) - the GPU is reset to stock; re-run your "
+                    + "tune command.");
+            }
+
+            throw;
+        }
+
+        try
+        {
+            applied.Restore(gpu);
+            log.Add("Previous tuning restored.");
+            return new(stock, log, null);
+        }
+        catch (Exception ex)
+        {
+            TryClear(gpu);
+            return new(stock, log, ErrorReporter.Describe(ex));
+        }
+    }
+
+    /// <summary>Best-effort reset for paths where a restore already failed: stock is the safe,
+    /// known state, and the failure being handled is the one to report.</summary>
+    private static void TryClear(IntPtr gpu)
+    {
+        try
+        {
+            Clear(gpu);
+        }
+        catch (Exception)
+        {
+        }
+    }
+
+    /// <summary>A clean stock read for the reference, or the transient-read refusal.</summary>
+    private static IReadOnlyList<(int Mv, int Mhz)> ReadStockOrThrow(IntPtr gpu)
+    {
+        IReadOnlyList<(int Mv, int Mhz)> stock = ReadUntilFreqsReadable(gpu);
+        if (!CurveFreqsReadable(stock))
+        {
+            throw new CliError($"The V/F curve {TransientReadMarker} (usually a brief power-state "
+                               + "transition) - retry in a moment.");
+        }
+
+        return stock;
+    }
+
     /// <summary>Reads the V/F curve, re-reading for up to 3 s while the frequency column is collapsed.
     /// The status curve is the *live* curve: around a power-state change its frequency column can
     /// briefly read back collapsed (dips or garbage), which would corrupt any frequency-dependent
@@ -164,7 +261,8 @@ internal static class GpuTuning
     /// the driver rejects throws too — so the caller persists and reports "done" only on a real,
     /// verified undervolt.
     /// </summary>
-    public static IReadOnlyList<string> Apply(IntPtr gpu, CurvePlan plan, int? targetMhz, int? memoryDeltaKhz)
+    public static IReadOnlyList<string> Apply(IntPtr gpu, CurvePlan plan, int? targetMhz, int? memoryDeltaKhz,
+        bool planFromReference = false)
     {
         if (memoryDeltaKhz is { } delta)
         {
@@ -180,18 +278,11 @@ internal static class GpuTuning
             // Don't leave a partial apply behind: the memory offset is already live, and without the
             // cap it isn't the tuning that was asked for. The revert is best-effort - the write's own
             // error is the one to surface.
-            try
-            {
-                Clear(gpu);
-            }
-            catch (Exception)
-            {
-            }
-
+            TryClear(gpu);
             throw;
         }
 
-        return ConfirmWrite(gpu, plan, targetMhz);
+        return ConfirmWrite(gpu, plan, targetMhz, planFromReference);
     }
 
     /// <summary>Writes a memory-only tuning: resets everything to stock first (a real run sets the
@@ -470,7 +561,8 @@ internal static class GpuTuning
     /// A write that provably didn't land reverts to stock and throws rather than reporting a cap that
     /// isn't there; a read we simply couldn't take is reported but not treated as failure.
     /// </summary>
-    private static IReadOnlyList<string> ConfirmWrite(IntPtr gpu, CurvePlan plan, int? targetMhz)
+    private static IReadOnlyList<string> ConfirmWrite(IntPtr gpu, CurvePlan plan, int? targetMhz,
+        bool planFromReference)
     {
         IReadOnlyList<(int Mv, int Mhz)> effective;
         try
@@ -511,7 +603,7 @@ internal static class GpuTuning
                 + $"- {reverted}. {PortingDocPointer}");
         }
 
-        return DescribeRealizedCap(effective, plan, targetMhz);
+        return DescribeRealizedCap(effective, plan, targetMhz, planFromReference);
     }
 
     /// <summary>Whether the effective read-back reflects a curve write (see <see cref="VerifyWriteReachedCurve"/>).</summary>
@@ -624,9 +716,12 @@ internal static class GpuTuning
     /// <summary>Reports the realized cap from the effective read-back (see
     /// <see cref="EffectiveCapPoint"/>). Flags an explicit frequency target that wasn't reached —
     /// measured against the plan's own cap clock, so a target the plan itself floored (a clock below
-    /// the lowest anchor's stock clock) is reported as floored, not blamed on the driver.</summary>
+    /// the lowest anchor's stock clock) is reported as floored, not blamed on the driver. A plan
+    /// built from the saved reference curve intentionally reads back shifted by the live curve's
+    /// thermal offset from the reference, so its note names that instead of a smoothing failure.</summary>
     private static IReadOnlyList<string> DescribeRealizedCap(
-        IReadOnlyList<(int Mv, int Mhz)> effective, CurvePlan plan, int? targetMhz)
+        IReadOnlyList<(int Mv, int Mhz)> effective, CurvePlan plan, int? targetMhz,
+        bool planFromReference)
     {
         // The write itself is already verified (see ConfirmWrite); this only reports the realized clock,
         // which lives in the live frequency column. If that column reads collapsed (usually a power-state
@@ -647,7 +742,10 @@ internal static class GpuTuning
             }
             else if (Math.Abs(cap.Mhz - plan.CapMhz) > CurveBinMhz)
             {
-                line += $" - target {f} not reached (driver smoothed the flatten)";
+                line += planFromReference
+                    ? $" - off the {f} MHz target at the current temperature (the written offset "
+                      + "matches the reference exactly)"
+                    : $" - target {f} not reached (driver smoothed the flatten)";
             }
         }
 

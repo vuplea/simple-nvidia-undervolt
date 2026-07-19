@@ -22,6 +22,8 @@ internal static class NvApi
     private const uint ID_GetErrorMessage = 0x6C2D048C;
     private const uint ID_EnumPhysicalGPUs = 0xE5AC921F;
     private const uint ID_GPU_GetFullName = 0xCEEE8E9F;
+    private const uint ID_GPU_GetPCIIdentifiers = 0x2DDFB66E;
+    private const uint ID_GPU_GetBoardInfo = 0x22D54523;
 
     private const uint ID_GPU_GetPstates20 = 0x6FF81213;
     private const uint ID_GPU_SetPstates20 = 0x0F4DAE6B;
@@ -70,6 +72,9 @@ internal static class NvApi
     private delegate int GetErrorMessageDelegate(int status, StringBuilder message);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
     private delegate int GetFullNameDelegate(IntPtr gpu, StringBuilder name);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int GetPciIdentifiersDelegate(IntPtr gpu,
+        out uint deviceId, out uint subSystemId, out uint revisionId, out uint extDeviceId);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate int GpuStructDelegate(IntPtr gpu, IntPtr data);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -156,6 +161,36 @@ internal static class NvApi
         catch (Exception)
         {
             return "<unknown>";
+        }
+    }
+
+    /// <summary>The GPU's PCI identifiers — the exact card model (device, subsystem/board vendor,
+    /// revision, extended device). Deliberately not the bus/slot ids: moving the same card to another
+    /// slot doesn't change its V/F curve.</summary>
+    public static (uint DeviceId, uint SubSystemId, uint RevisionId, uint ExtDeviceId)
+        GetPciIdentifiers(IntPtr gpu)
+    {
+        Check(GetDelegate<GetPciIdentifiersDelegate>(ID_GPU_GetPCIIdentifiers)(
+            gpu, out uint device, out uint subSystem, out uint revision, out uint extDevice),
+            "NvAPI_GPU_GetPCIIdentifiers");
+        return (device, subSystem, revision, extDevice);
+    }
+
+    /// <summary>The board serial number as hex, distinguishing two physical units of the same model
+    /// (the stock V/F curve is per-chip, from factory binning). Null when the driver doesn't report
+    /// one — availability varies by board — so callers treat it as a best-effort extra key.</summary>
+    public static string? TryGetBoardSerial(IntPtr gpu)
+    {
+        const int size = 20; // NV_BOARD_INFO_V1: version + 16-byte board number
+        try
+        {
+            byte[] bytes = ReadRaw(gpu, ID_GPU_GetBoardInfo, 1, size, size, requestMaskWords: 0);
+            byte[] serial = bytes[4..size];
+            return serial.All(b => b == 0) ? null : Convert.ToHexString(serial);
+        }
+        catch (Exception)
+        {
+            return null;
         }
     }
 

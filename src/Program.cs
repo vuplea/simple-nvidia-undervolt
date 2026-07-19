@@ -133,6 +133,7 @@ internal static class Cli
 
             case "install": return RunInstallCommand(args, isRelayChild);
             case "clear": return RunClearCommand(args, isRelayChild);
+            case "save-reference": return RunWriteCommand(args, isRelayChild, () => OnFirstGpu(RunSaveReference));
             case "watch": return RunWatchCommand(args);
 
             case "status": return RunGpuCommand(args, RunStatus);
@@ -293,6 +294,7 @@ internal static class Cli
         Console.WriteLine($"  Core curve offset: {tuning.DescribeCoreCurve()}");
         Console.WriteLine($"  Memory clock: {tuning.DescribeMemoryClock()}");
         Console.WriteLine($"  Core voltage boost: {tuning.DescribeVoltageBoost()}");
+        Console.WriteLine($"  Reference curve: {ReferenceCurve.DescribeForStatus(gpu)}");
         Console.WriteLine($"  Re-applies at logon: {startupTask.Result}");
 
         // Validate the read the same way the write path does: if the V/F curve doesn't decode as a
@@ -353,6 +355,45 @@ internal static class Cli
         }
     }
 
+    /// <summary>'save-reference' captures the stock V/F curve into the registry, keyed to this GPU
+    /// (see <see cref="ReferenceCurve"/>); tuning then plans from it instead of a live read, so the
+    /// same command always produces the same tuning. An applied tuning is reset for the capture and
+    /// restored right after (see <see cref="GpuTuning.CaptureStockForReference"/>) — with the GPU
+    /// writes that involves, plus the HKLM write, it elevates like the other write commands.</summary>
+    private static void RunSaveReference(IntPtr gpu)
+    {
+        Console.WriteLine($"Saving the reference curve for {NvApi.SafeFullName(gpu)}:");
+        GpuTuning.ReferenceCapture capture = GpuTuning.CaptureStockForReference(gpu);
+        PrintIndented(capture.Log);
+        int? tempC = TryReadTemperatureC(gpu);
+        ReferenceCurve.Save(GpuIdentity.Read(gpu), capture.Stock, tempC);
+        Console.WriteLine($"  Saved {capture.Stock.Count} stock points"
+                          + $"{(tempC is { } t ? $", captured at {t} C" : string.Empty)}.");
+        Console.WriteLine("  Tuning now plans from this curve; re-run 'save-reference' to refresh it.");
+
+        // The reference itself is good (it is stock data, unaffected by the restore), so it stays
+        // saved - but the run must still fail loudly: the user's tuning is no longer applied.
+        if (capture.RestoreFailure is { } failure)
+        {
+            throw new CliError($"The reference was saved, but restoring the previous tuning failed: "
+                + $"{failure}\nThe GPU is reset to stock - re-run your tune command or profile shortcut.");
+        }
+    }
+
+    /// <summary>Best-effort: the temperature is a capture-condition detail recorded with the
+    /// reference, not a requirement of it.</summary>
+    private static int? TryReadTemperatureC(IntPtr gpu)
+    {
+        try
+        {
+            return NvApi.GetCoreTemperatureC(gpu);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
     /// <summary>A write command only reaches here non-elevated when --no-elevate suppressed the
     /// auto-elevation relay; the driver will likely reject the write, so flag it.</summary>
     private static void WarnIfNotElevated()
@@ -377,14 +418,35 @@ internal static class Cli
 
         GpuTuning.CurvePlan? plan = null;
         int? targetMhz = null;
+        bool planFromReference = false;
         if (request.Mv.IsSet)
         {
-            // Each real run resets to stock first - before the stock read, so the plan comes from a
-            // direct, clean read; a dry run stays read-only and plans off the recovered stock curve.
-            // Both refuse an unrecognized card (hardware-specific buffer offsets) before writing anything.
-            IReadOnlyList<(int Mv, int Mhz)> stock = request.DryRun
-                ? GpuTuning.RecoverStockReadOnly(gpu)
-                : GpuTuning.ResetAndReadStock(gpu);
+            // Plan from the saved reference curve when one matches this GPU - the live curve shifts
+            // with temperature, so only a fixed reference makes the same command reproduce the same
+            // tuning; safety still rides on live reads (Clear's recognized-curve guard, the
+            // post-write confirmation). Otherwise each real run resets to stock first - before the
+            // stock read, so the plan comes from a direct, clean read; a dry run stays read-only and
+            // plans off the recovered stock curve. All paths refuse an unrecognized card
+            // (hardware-specific buffer offsets) before writing anything.
+            ReferenceCurve.MatchResult reference = ReferenceCurve.Match(gpu);
+            Console.WriteLine($"  {reference.Note}");
+
+            IReadOnlyList<(int Mv, int Mhz)> stock;
+            if (reference.Curve is { } referenceStock)
+            {
+                planFromReference = true;
+                stock = referenceStock;
+                if (!request.DryRun)
+                {
+                    GpuTuning.Clear(gpu); // a real run still starts from a fresh stock reset
+                }
+            }
+            else
+            {
+                stock = request.DryRun
+                    ? GpuTuning.RecoverStockReadOnly(gpu)
+                    : GpuTuning.ResetAndReadStock(gpu);
+            }
 
             // Build the plan before the memory/curve writes: it needs a clean curve read, so a collapsed
             // (transitional) read fails here instead of after a partial apply.
@@ -414,7 +476,7 @@ internal static class Cli
         {
             PrintIndented(request.DryRun
                 ? GpuTuning.DescribePlan(plan, targetMhz)
-                : GpuTuning.Apply(gpu, plan, targetMhz, memory?.DeltaKhz));
+                : GpuTuning.Apply(gpu, plan, targetMhz, memory?.DeltaKhz, planFromReference));
         }
         else if (memory is { } mem)
         {
@@ -518,9 +580,14 @@ internal static class Cli
             watch                 Poll live core voltage/clock/temp/power, tracking the max
                                   (--interval <seconds> to change the 1s poll; Ctrl+C to stop).
             clear                 Reset all tuning to stock and remove logon re-apply.
+            save-reference        Save the stock V/F curve (best captured idle and cool) as the tuning
+                                  reference: tuning then plans from it instead of the live curve, whose
+                                  thermal shift otherwise drifts the result between runs. An applied
+                                  tuning is reset for the capture and restored right after.
 
-            'status' and 'watch' are read-only and need no elevation. Tuning, 'clear' and 'install' need
-            administrator rights; if run from a normal terminal they prompt for elevation.
+            'status' and 'watch' are read-only and need no elevation. Tuning, 'clear', 'install' and
+            'save-reference' need administrator rights; if run from a normal terminal they prompt for
+            elevation.
 
             Tuning options:
             Voltage cap, pick preferred syntax (required to provide, unless tuning just the memory clock):
