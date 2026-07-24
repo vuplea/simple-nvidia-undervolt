@@ -27,8 +27,8 @@ internal static class NvApi
     private const uint ID_GPU_GetPstates20 = 0x6FF81213;
     private const uint ID_GPU_SetPstates20 = 0x0F4DAE6B;
     private const uint ID_GPU_GetClockBoostLock = 0xE440B867; // PerfClientLimitsGetStatus (diagnostics only)
-    private const uint ID_GPU_GetClkDomainsInfo = 0x64B43A6A; // diagnostics only (scanned as raw bytes)
-    private const uint ID_GPU_GetClkVfPointsInfo = 0x507B4B59; // diagnostics only (scanned as raw bytes)
+    private const uint ID_GPU_GetClkDomainsInfo = 0x64B43A6A; // a.k.a. ClkDomainsGetInfo — offset ranges
+    private const uint ID_GPU_GetClockBoostMask = 0x507B4B59; // a.k.a. ClkVfPointsGetInfo
     private const uint ID_GPU_GetClockBoostTable = 0x23F1B133; // a.k.a. ClkVfPointsGetControl
     private const uint ID_GPU_SetClockBoostTable = 0x0733E009; // a.k.a. ClkVfPointsSetControl
     private const uint ID_GPU_GetCoreVoltageBoostPercent = 0x9DF23CA1;
@@ -42,6 +42,9 @@ internal static class NvApi
 
     /// <summary>NvAPI_GPU_GetAllClockFrequencies — current/base/boost public clocks.</summary>
     private const uint ID_GPU_GetAllClockFrequencies = 0xDCB616C3;
+
+    /// <summary>NvAPI_GPU_GetArchInfo — the architecture id (documented public API).</summary>
+    private const uint ID_GPU_GetArchInfo = 0xD8265D24;
 
     /// <summary>NvAPI_GPU_GetThermalSettings — current temperatures. Takes a sensor-index arg.</summary>
     private const uint ID_GPU_GetThermalSettings = 0xE3640A56;
@@ -234,13 +237,13 @@ internal static class NvApi
         return buffer;
     }
 
-    private static void SetRequestMask(IntPtr buffer, int maskWords)
-    {
-        for (int i = 0; i < maskWords; i++)
-        {
-            Marshal.WriteInt32(buffer, 4 + i * 4, unchecked((int)0xFFFFFFFF));
-        }
-    }
+    /// <summary>Stamps a request mask over the words following the version — which entries the caller
+    /// asks the driver to fill (or apply, on a set).</summary>
+    private static void WriteRequestMask(IntPtr buffer, byte[] mask)
+        => Marshal.Copy(mask, 0, buffer + 4, mask.Length);
+
+    private static byte[] AllOnesMask(int words)
+        => Enumerable.Repeat((byte)0xFF, words * 4).ToArray();
 
     // --- Performance states (memory / core clock offsets, base voltage) ---
 
@@ -327,12 +330,17 @@ internal static class NvApi
 
     // --- V/F curve: status (effective curve) and control (per-point frequency deltas) ---
     //
-    // Both buffers are flat arrays of per-point entries, one per voltage anchor (~127 of them); the
-    // control table is shifted one anchor relative to the status (see the off-by-one note below).
-    // The byte offsets below were derived against a known
+    // Both buffers are flat arrays of per-point entries, one per voltage anchor (80-130ish of them,
+    // by generation); the control table is shifted one anchor relative to the status (see the
+    // off-by-one note below). The byte offsets below were derived against a known
     // Afterburner curve; the typed-struct layout the SDK headers imply does not match the driver, so
     // these are handled as raw bytes. The status buffer reports the *effective* curve (it reflects an
     // applied offset); the control buffer holds only the editable freq deltas (0 at stock).
+    //
+    // Requests for either buffer carry a bitmask (the words after the version) naming the point
+    // slots to fill, and the driver fails the whole call with NVAPI_ERROR when the mask names a
+    // slot the card doesn't have - so the mask is read from the driver (GetVfPointsMask) rather
+    // than assumed.
     private const int CONTROL_TABLE_SIZE = 9248; // ClkVfPointsGetControl / SetControl, version 1
     public const int CtrlEntryBase = 0x64;
     public const int CtrlEntryStride = 36;
@@ -341,6 +349,7 @@ internal static class NvApi
     private const int StatusCurveSize = 7208; // ClkVfPointsGetStatus, version 1
     public const int StatusEntryBase = 0x40;
     public const int StatusEntryStride = 28;
+    public const int StatusTypeOffset = 0x04; // point domain: 0 = core, 1 = memory
     public const int StatusFreqOffset = 0x08; // kHz
     public const int StatusVoltOffset = 0x0C; // uV
 
@@ -353,16 +362,96 @@ internal static class NvApi
     public const int MaxCoreVoltUv = 1_300_000;
     public const int MinBoostClockKhz = 1_200_000;
 
+    private const int CLOCK_MASKS_SIZE = 6188; // ClkVfPointsGetInfo (a.k.a. GetClockBoostMask), version 1
+
+    /// <summary>The width of the request-mask field in the ClkVfPoints structs: the 32 bytes after
+    /// the version word, one bit per point slot (a 5090 populates 132 bits).</summary>
+    private const int VfPointsMaskBytes = 32;
+
+    /// <summary>The card's own VF-point mask - one bit per populated curve-point slot, read from
+    /// ClkVfPointsGetInfo (which itself takes no input mask). The status and control calls reject a
+    /// request mask naming slots the card doesn't have, and the slot count varies by generation
+    /// (~103 on a GTX 1080, 132 on a 5090), so every status/control request carries this mask.
+    /// This is also the first ClkVfPoints call on every path, so a card with no curve interface at
+    /// all fails here - diagnosed by architecture rather than left as a raw driver error.</summary>
+    private static byte[] GetVfPointsMask(IntPtr gpu)
+    {
+        try
+        {
+            byte[] bytes = ReadRaw(gpu, ID_GPU_GetClockBoostMask, 1, CLOCK_MASKS_SIZE, CLOCK_MASKS_SIZE,
+                requestMaskWords: 0);
+            return bytes[4..(4 + VfPointsMaskBytes)];
+        }
+        catch (CliError error)
+        {
+            throw CurveUnavailableDiagnosis(ArchitectureId(gpu)) is { } diagnosis
+                ? new CliError($"{diagnosis} ({error.Message})")
+                : error;
+        }
+    }
+
+    /// <summary>NV_GPU_ARCHITECTURE_GP100 - Pascal, the first generation with a per-point V/F curve
+    /// (GPU Boost 3.0). Ids are ordered by generation, so anything below has no curve at all.</summary>
+    internal const uint ARCHITECTURE_PASCAL = 0x130;
+
+    /// <summary>The GPU's architecture id (NV_GPU_ARCHITECTURE_ID: 0x110 Maxwell, 0x130 Pascal,
+    /// 0x160 Turing, 0x1B0 Blackwell, ...), or null when the driver won't report it - this feeds an
+    /// error diagnosis, which the lookup's own failure must not displace.</summary>
+    private static uint? ArchitectureId(IntPtr gpu)
+    {
+        try
+        {
+            // NV_GPU_ARCH_INFO_V2: version + architecture + implementation + revision.
+            return BitConverter.ToUInt32(ReadRaw(gpu, ID_GPU_GetArchInfo, 2, 16, 16, requestMaskWords: 0), 4);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>What a failed VF-point read means for this card, or null when the architecture is
+    /// unknown and the driver's own error has to speak for itself. Pre-Pascal generations have no
+    /// ClkVfPoints interface, so tuning them is impossible rather than unported; from Pascal on the
+    /// interface exists, but some SKUs (laptop parts have been seen) ship with it stubbed.</summary>
+    internal static string? CurveUnavailableDiagnosis(uint? architectureId)
+    {
+        if (architectureId is not { } id)
+        {
+            return null;
+        }
+
+        if (id < ARCHITECTURE_PASCAL)
+        {
+            string family = id switch
+            {
+                >= 0x110 => "Maxwell",
+                >= 0xE0 => "Kepler",
+                >= 0xC0 => "Fermi",
+                _ => $"architecture 0x{id:X}",
+            };
+            return $"This is a {family}-generation GPU: the per-point V/F curve this tool tunes was "
+                + "introduced with Pascal (GTX 10xx, GPU Boost 3.0), so earlier cards cannot be "
+                + "tuned this way at all.";
+        }
+
+        return "The driver doesn't expose the V/F curve interface on this GPU (seen on some laptop "
+            + "parts).";
+    }
+
     /// <summary>The raw status (effective curve) buffer, for re-detecting the curve layout when a read
     /// fails the plausibility check (the offsets likely don't fit this GPU). Read-only.</summary>
     public static byte[] ReadVfCurveStatusRaw(IntPtr gpu)
-        => ReadRaw(gpu, ID_GPU_GetVfCurveStatus, 1, StatusCurveSize, StatusCurveSize, requestMaskWords: 4);
+        => ReadRaw(gpu, ID_GPU_GetVfCurveStatus, 1, StatusCurveSize, StatusCurveSize, GetVfPointsMask(gpu));
 
     /// <summary>Reads the V/F curve as ordered (millivolt, megahertz) points. The voltage of each
     /// anchor is stable, but the frequency column reflects the <em>live</em> curve: the lowest anchors
     /// pin at a floor clock at idle, and around a power-state change the whole column can briefly read
     /// back collapsed. The point ordering aligns by index with the control-table deltas. Entries are
-    /// walked by ascending voltage, independent of the frequency, so the voltage map survives any read.</summary>
+    /// walked by ascending voltage, independent of the frequency, so the voltage map survives any read.
+    /// Only core-domain points count: the memory-domain slots that follow them (slot 127 on a 5090,
+    /// slot 80 on Pascal) end the walk outright, so one can't slip in as a curve anchor even with a
+    /// voltage that happens to continue the ascent.</summary>
     public static IReadOnlyList<(int Mv, int Mhz)> GetVfCurve(IntPtr gpu)
     {
         byte[] bytes = ReadVfCurveStatusRaw(gpu);
@@ -371,6 +460,11 @@ internal static class NvApi
         int lastVoltUv = 0;
         for (int e = StatusEntryBase; e + StatusEntryStride <= bytes.Length; e += StatusEntryStride)
         {
+            if (BitConverter.ToInt32(bytes, e + StatusTypeOffset) != 0)
+            {
+                break; // a memory-domain point - those slots follow the core anchors
+            }
+
             int freq = BitConverter.ToInt32(bytes, e + StatusFreqOffset);
             int volt = BitConverter.ToInt32(bytes, e + StatusVoltOffset);
             if (volt is < MinCoreVoltUv or > MaxCoreVoltUv)
@@ -390,6 +484,73 @@ internal static class NvApi
         }
 
         return points;
+    }
+
+    // --- Control-table delta unit ---
+    //
+    // The status curve's frequencies are plain kHz on every generation, but the control table's
+    // delta field is not: on Pascal it is in HALF-kHz units (a field value of 200000 moves the
+    // anchor by 100 MHz), while Turing and later use plain kHz. The unit is witnessed read-only
+    // through ClkDomainsGetInfo: the graphics domain's delta range reads +/-2,000,000 raw on Pascal
+    // and +/-1,000,000 on plain-unit cards, both meaning the universal +/-1000 MHz offset limit.
+    // The helpers below read/write true kHz and convert at the field, so nothing else in the
+    // codebase sees the unit. (Evidence: Demion/nvapioc and arcnmx/nvapi-rs, both Pascal-era;
+    // the +/-1,000,000 range and plain-kHz writes verified on a 5090.)
+
+    private const int CLK_DOMAINS_SIZE = 2344; // ClkDomainsGetInfo, version 1
+    private const int DomainsEntryBase = 0x28;
+    private const int DomainsEntryStride = 72;
+    private const int DomainsTypeOffset = 0x04;     // public clock id: 0 = graphics, 4 = memory
+    private const int DomainsRangeMaxOffset = 0x28; // signed, in the control table's delta unit
+    private const int DomainsRangeMinOffset = 0x2C;
+
+    /// <summary>The graphics domain's frequency-delta range in raw (control-table) units, from a
+    /// ClkDomainsGetInfo buffer: the first graphics-typed entry with a populated range. Null when
+    /// none is - the buffer doesn't fit this layout, and no unit can be inferred from it.</summary>
+    internal static (int RawMax, int RawMin)? GraphicsDeltaRange(byte[] bytes)
+    {
+        for (int e = DomainsEntryBase; e + DomainsEntryStride <= bytes.Length; e += DomainsEntryStride)
+        {
+            int rawMax = BitConverter.ToInt32(bytes, e + DomainsRangeMaxOffset);
+            if (BitConverter.ToInt32(bytes, e + DomainsTypeOffset) == 0 && rawMax != 0)
+            {
+                return (rawMax, BitConverter.ToInt32(bytes, e + DomainsRangeMinOffset));
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Raw field units per kHz for the control table's delta field: 2 only on the exact
+    /// Pascal signature (+/-2,000,000 raw for the +/-1000 MHz limit) on a Pascal-architecture card,
+    /// 1 otherwise. Both conditions are needed: the signature alone would also match a future
+    /// plain-unit card that genuinely widens its limit to +/-2000 MHz, and doubling there
+    /// overshoots the request. Everything else - Volta included (untested; deliberately outside the
+    /// band), and an unreadable architecture - deliberately reads as 1: unscaled deltas are the
+    /// safe miss, landing at half depth with the realized-cap report saying so.</summary>
+    internal static int CurveDeltaUnitScale((int RawMax, int RawMin)? graphicsRange, uint? architectureId)
+        => graphicsRange == (2_000_000, -2_000_000)
+           && architectureId is >= ARCHITECTURE_PASCAL and < ARCHITECTURE_VOLTA
+            ? 2
+            : 1;
+
+    /// <summary>NV_GPU_ARCHITECTURE_GV100 - Volta, the first id past the Pascal band.</summary>
+    internal const uint ARCHITECTURE_VOLTA = 0x140;
+
+    /// <summary>The card's control-table delta unit (see <see cref="CurveDeltaUnitScale"/>). A card
+    /// where the witness can't be read at all reads as plain units - the pre-witness behavior.</summary>
+    private static int GetCurveDeltaUnitScale(IntPtr gpu)
+    {
+        try
+        {
+            byte[] bytes = ReadRaw(gpu, ID_GPU_GetClkDomainsInfo, 1, CLK_DOMAINS_SIZE, CLK_DOMAINS_SIZE,
+                requestMaskWords: 0);
+            return CurveDeltaUnitScale(GraphicsDeltaRange(bytes), ArchitectureId(gpu));
+        }
+        catch (Exception)
+        {
+            return 1;
+        }
     }
 
     // The control entry at index j drives the effective frequency of the NEXT curve anchor (status
@@ -414,13 +575,14 @@ internal static class NvApi
     /// (the delta of anchor i is read from control entry i-1).</summary>
     public static int[] GetCurveFreqDeltasKhz(IntPtr gpu, int count)
     {
+        int scale = GetCurveDeltaUnitScale(gpu);
         byte[] bytes = ReadRaw(gpu, ID_GPU_GetClockBoostTable, 1, CONTROL_TABLE_SIZE, CONTROL_TABLE_SIZE,
-            requestMaskWords: 4);
+            GetVfPointsMask(gpu));
 
         var deltas = new int[count];
         for (int i = 1; i < count; i++)
         {
-            deltas[i] = BitConverter.ToInt32(bytes, CtrlDeltaPos(i));
+            deltas[i] = BitConverter.ToInt32(bytes, CtrlDeltaPos(i)) / scale;
         }
 
         return deltas;
@@ -439,21 +601,23 @@ internal static class NvApi
                 $"{deltasKhz.Length} curve deltas don't fit the {CONTROL_TABLE_SIZE}-byte control table.");
         }
 
+        int scale = GetCurveDeltaUnitScale(gpu);
+        byte[] mask = GetVfPointsMask(gpu);
         IntPtr buffer = AllocZeroed(CONTROL_TABLE_SIZE);
         try
         {
             Marshal.WriteInt32(buffer, MakeVersion(CONTROL_TABLE_SIZE, 1));
-            SetRequestMask(buffer, 4);
+            WriteRequestMask(buffer, mask);
             Check(GetDelegate<GpuStructDelegate>(ID_GPU_GetClockBoostTable)(gpu, buffer),
                 "NvAPI_GPU_GetClockBoostTable");
 
             for (int i = 1; i < deltasKhz.Length; i++)
             {
-                Marshal.WriteInt32(buffer, CtrlDeltaPos(i), deltasKhz[i]);
+                Marshal.WriteInt32(buffer, CtrlDeltaPos(i), deltasKhz[i] * scale);
             }
 
             Marshal.WriteInt32(buffer, MakeVersion(CONTROL_TABLE_SIZE, 1));
-            SetRequestMask(buffer, 4);
+            WriteRequestMask(buffer, mask);
             Check(GetDelegate<GpuStructDelegate>(ID_GPU_SetClockBoostTable)(gpu, buffer),
                 "NvAPI_GPU_SetClockBoostTable");
         }
@@ -502,14 +666,28 @@ internal static class NvApi
     /// each one needs. Sizes that have no managed struct are given as literals.</summary>
     public static IReadOnlyList<(string Name, byte[] Bytes)> ReadRawTuningBuffers(IntPtr gpu)
     {
-        (string Name, uint Id, int Version, int Size, int MaskWords)[] specs =
+        // The curve buffers' requests must carry the card's VF-point mask (see GetVfPointsMask).
+        // Everything here is best-effort, so when the mask itself can't be read they carry an
+        // all-ones 128-bit mask instead - a subset request is accepted (a 5090 has 132 slots), so
+        // this keeps the curve buffers scannable on such a card even without the mask call.
+        byte[] vfpMask;
+        try
         {
-            ("pstates20", ID_GPU_GetPstates20, 1, Marshal.SizeOf<Pstates20InfoV1>(), 0),
-            ("curveControl", ID_GPU_GetClockBoostTable, 1, CONTROL_TABLE_SIZE, 4),
-            ("curveStatusV1", ID_GPU_GetVfCurveStatus, 1, StatusCurveSize, 4), // same buffer GetVfCurve decodes
-            ("voltageLock", ID_GPU_GetClockBoostLock, 2, 780, 0),
-            ("clkDomainsInfo", ID_GPU_GetClkDomainsInfo, 1, 2344, 0),
-            ("clkVfPointsInfo", ID_GPU_GetClkVfPointsInfo, 1, 6188, 4),
+            vfpMask = GetVfPointsMask(gpu);
+        }
+        catch (Exception)
+        {
+            vfpMask = AllOnesMask(4);
+        }
+
+        (string Name, uint Id, int Version, int Size, byte[] Mask)[] specs =
+        {
+            ("pstates20", ID_GPU_GetPstates20, 1, Marshal.SizeOf<Pstates20InfoV1>(), Array.Empty<byte>()),
+            ("curveControl", ID_GPU_GetClockBoostTable, 1, CONTROL_TABLE_SIZE, vfpMask),
+            ("curveStatusV1", ID_GPU_GetVfCurveStatus, 1, StatusCurveSize, vfpMask), // same buffer GetVfCurve decodes
+            ("voltageLock", ID_GPU_GetClockBoostLock, 2, 780, Array.Empty<byte>()),
+            ("clkDomainsInfo", ID_GPU_GetClkDomainsInfo, 1, 2344, Array.Empty<byte>()),
+            ("clkVfPointsInfo", ID_GPU_GetClockBoostMask, 1, CLOCK_MASKS_SIZE, Array.Empty<byte>()),
         };
 
         var result = new List<(string, byte[])>();
@@ -517,7 +695,7 @@ internal static class NvApi
         {
             try
             {
-                result.Add((spec.Name, ReadRaw(gpu, spec.Id, spec.Version, spec.Size, spec.Size, spec.MaskWords)));
+                result.Add((spec.Name, ReadRaw(gpu, spec.Id, spec.Version, spec.Size, spec.Size, spec.Mask)));
             }
             catch (Exception)
             {
@@ -565,21 +743,31 @@ internal static class NvApi
         }
     }
 
+    /// <summary>The all-ones-mask form of the raw read, for the diagnostics commands whose mask is a
+    /// word count argument. The count is bounded before the mask is materialized: it arrives from a
+    /// command-line argument, and a huge value would allocate its full size - or overflow the byte
+    /// count outright - if the fit check waited for the built array.</summary>
+    public static byte[] ReadRaw(IntPtr gpu, uint functionId, int versionNumber, int claimedSize,
+        int allocSize, int requestMaskWords)
+        => requestMaskWords < 0 || 4 + (long)requestMaskWords * 4 > allocSize
+            ? throw new CliError($"Raw read 0x{functionId:X8}: {requestMaskWords} request-mask words "
+                                 + $"don't fit the {allocSize}-byte buffer.")
+            : ReadRaw(gpu, functionId, versionNumber, claimedSize, allocSize, AllOnesMask(requestMaskWords));
+
     /// <summary>Reads a raw buffer for a function. <paramref name="allocSize"/> may exceed
     /// <paramref name="claimedSize"/>: the driver validates the version word against the claimed
     /// size but may write the (larger) real struct, so the extra allocation keeps any overflow in
     /// our own padding instead of corrupting the heap. Returns the full allocation.</summary>
-    public static byte[] ReadRaw(IntPtr gpu, uint functionId, int versionNumber, int claimedSize,
-        int allocSize, int requestMaskWords)
+    private static byte[] ReadRaw(IntPtr gpu, uint functionId, int versionNumber, int claimedSize,
+        int allocSize, byte[] requestMask)
     {
         // The claimed size and mask width reach here from diagnostics arguments; past the allocation
         // they would let the driver write beyond the buffer, or write the mask out of bounds ourselves
         // - unmanaged heap corruption, not an exception.
-        if (claimedSize < 4 || claimedSize > allocSize
-            || requestMaskWords < 0 || 4 + (long)requestMaskWords * 4 > allocSize)
+        if (claimedSize < 4 || claimedSize > allocSize || 4 + (long)requestMask.Length > allocSize)
         {
-            throw new CliError($"Raw read 0x{functionId:X8}: size {claimedSize} or mask words "
-                                + $"{requestMaskWords} don't fit the {allocSize}-byte buffer.");
+            throw new CliError($"Raw read 0x{functionId:X8}: size {claimedSize} or the "
+                                + $"{requestMask.Length}-byte request mask don't fit the {allocSize}-byte buffer.");
         }
 
         if (claimedSize > MaxClaimedSize)
@@ -592,7 +780,7 @@ internal static class NvApi
         try
         {
             Marshal.WriteInt32(buffer, MakeVersion(claimedSize, versionNumber));
-            SetRequestMask(buffer, requestMaskWords);
+            WriteRequestMask(buffer, requestMask);
             Check(GetDelegate<GpuStructDelegate>(functionId)(gpu, buffer), $"raw read 0x{functionId:X8}");
             var bytes = new byte[allocSize];
             Marshal.Copy(buffer, bytes, 0, allocSize);

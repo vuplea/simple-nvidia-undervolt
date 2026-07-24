@@ -650,7 +650,7 @@ internal static class GpuTuning
     /// isn't one we recognize, no tuning should be written at all.</summary>
     public static bool CurveVoltsPlausible(IReadOnlyList<(int Mv, int Mhz)> curve)
     {
-        // A real table has ~127 anchors; a mismatched layout breaks out after a few points.
+        // A real table has 80-130ish anchors; a mismatched layout breaks out after a few points.
         if (curve.Count < 16)
         {
             return false;

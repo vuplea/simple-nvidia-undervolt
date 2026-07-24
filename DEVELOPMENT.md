@@ -77,3 +77,34 @@ The curve lives in two index-aligned buffers: the **status** (`0x21537AD4` v1, 2
 +0x08 / volt +0x0C) holds the live effective curve; the **control** (`0x23F1B133` v1, 36-byte entries,
 signed kHz delta +0x18) holds the editable deltas. A control entry drives the next status anchor (so
 anchor `i` ← control `i-1`). The status freq column can collapse at idle, but the voltages stay valid.
+
+Requests for either buffer carry a bitmask (the words after the version) naming the point slots to
+fill, and the driver fails the whole call with `NVAPI_ERROR` when the mask names a slot the card
+doesn't have. The card's own mask comes from `0x507B4B59` (GetClockBoostMask, same 6188-byte struct
+`clkVfPointsInfo` the scan dumps); the slot count varies by generation (~103 on a GTX 1080, 132 on a
+5090), which is also why a `raw` dump of these buffers needs a `maskWords` argument small enough for
+the card.
+
+The core-domain point slots come first (a per-entry type word says which domain a slot belongs to:
+0 = core, 1 = memory), and the memory slots follow — slot 80 on Pascal, slot 127 on a 5090.
+
+## Generations
+
+**Pascal (GTX 10xx, 2016) is the architectural floor**: GPU Boost 3.0 introduced the per-point V/F
+curve, and no `ClkVfPoints` interface exists before it — Maxwell and older cannot be tuned this way
+at all (their undervolting is BIOS-mod territory). A failed VF-point read is diagnosed via the
+public `NvAPI_GPU_GetArchInfo` (`0xD8265D24`): pre-Pascal architectures get a "cannot be tuned"
+refusal by family name; Pascal-onward architectures get a stubbed-driver-interface message (seen on
+some laptop SKUs). Volta (Titan V) is untested but has the Boost 3.0 curve; the mask adapts to
+whatever slot layout it reports, while delta scaling stays off outside the Pascal band — a
+doubled-unit Volta would land at half depth, reported as such.
+
+The status curve's frequencies are plain kHz on every generation. The control table's delta field
+is **half-kHz units on Pascal** (write
+200000 to move an anchor 100 MHz) and plain kHz from Turing on. The unit is witnessed read-only via
+`0x64B43A6A` (ClkDomainsGetInfo, the scan's `clkDomainsInfo`): the graphics entry's delta range
+reads ±2,000,000 raw on Pascal and ±1,000,000 on plain-unit cards — both meaning the universal
+±1000 MHz offset limit. `NvApi` converts at the field only on the exact Pascal signature **and** a
+Pascal architecture id — the signature alone would also match a future plain-unit card that
+genuinely widens its limit to ±2000 MHz, and doubling there overshoots — so the rest of the code
+always works in true kHz.
