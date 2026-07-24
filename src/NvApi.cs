@@ -23,7 +23,6 @@ internal static class NvApi
     private const uint ID_EnumPhysicalGPUs = 0xE5AC921F;
     private const uint ID_GPU_GetFullName = 0xCEEE8E9F;
     private const uint ID_GPU_GetPCIIdentifiers = 0x2DDFB66E;
-    private const uint ID_GPU_GetBoardInfo = 0x22D54523;
 
     private const uint ID_GPU_GetPstates20 = 0x6FF81213;
     private const uint ID_GPU_SetPstates20 = 0x0F4DAE6B;
@@ -174,24 +173,6 @@ internal static class NvApi
             gpu, out uint device, out uint subSystem, out uint revision, out uint extDevice),
             "NvAPI_GPU_GetPCIIdentifiers");
         return (device, subSystem, revision, extDevice);
-    }
-
-    /// <summary>The board serial number as hex, distinguishing two physical units of the same model
-    /// (the stock V/F curve is per-chip, from factory binning). Null when the driver doesn't report
-    /// one — availability varies by board — so callers treat it as a best-effort extra key.</summary>
-    public static string? TryGetBoardSerial(IntPtr gpu)
-    {
-        const int size = 20; // NV_BOARD_INFO_V1: version + 16-byte board number
-        try
-        {
-            byte[] bytes = ReadRaw(gpu, ID_GPU_GetBoardInfo, 1, size, size, requestMaskWords: 0);
-            byte[] serial = bytes[4..size];
-            return serial.All(b => b == 0) ? null : Convert.ToHexString(serial);
-        }
-        catch (Exception)
-        {
-            return null;
-        }
     }
 
     // --- Generic versioned-struct get/set ---

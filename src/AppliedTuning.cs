@@ -1,36 +1,26 @@
 namespace SimpleNvidiaUndervolt;
 
-/// <summary>The raw applied tuning state — every knob <see cref="GpuTuning.Clear"/> resets: the
-/// per-anchor curve deltas, the P0 clock/voltage offsets and the voltage boost. Snapshotted at the
-/// delta level so a <c>save-reference</c> capture can reset the card to stock and put the exact
-/// state back (see <see cref="GpuTuning.CaptureStockForReference"/>), round-tripping even a foreign
-/// (Afterburner) tuning.</summary>
-internal sealed record AppliedTuning(int[] CurveDeltasKhz, int GraphicsDeltaKhz, int MemoryDeltaKhz,
-    int CoreVoltageDeltaUv, uint VoltageBoostPercent)
+/// <summary>The applied tuning state, at the level of the knobs this tool sets: the per-anchor
+/// curve deltas and the P0 memory offset. Snapshotted at the delta level so a
+/// <c>set-reference-curve</c> capture can reset the card to stock and put the exact state back
+/// (see <see cref="GpuTuning.CaptureStockForReference"/>). Knobs only a foreign tool sets — a
+/// voltage boost, a P0 clock or voltage offset — are outside it: a capture's reset clears them to
+/// stock and the restore leaves them there.</summary>
+internal sealed record AppliedTuning(int[] CurveDeltasKhz, int MemoryDeltaKhz)
 {
-    public bool IsStock
-        => CurveDeltasKhz.All(d => d == 0) && GraphicsDeltaKhz == 0 && MemoryDeltaKhz == 0
-           && CoreVoltageDeltaUv == 0 && VoltageBoostPercent == 0;
+    public bool IsStock => CurveDeltasKhz.All(d => d == 0) && MemoryDeltaKhz == 0;
 
     public static AppliedTuning Read(IntPtr gpu)
-    {
-        Pstates20InfoV1 info = NvApi.GetPstates20(gpu);
-        return new(
-            NvApi.GetCurveFreqDeltasKhz(gpu, NvApi.MaxCurveAnchors),
-            GpuTuning.P0Clock(info, NvApi.CLOCK_DOMAIN_GRAPHICS)?.FreqDeltaKhz.Value ?? 0,
-            MemoryDelta(gpu, info),
-            GpuTuning.P0BaseVoltage(info, NvApi.VOLTAGE_DOMAIN_CORE)?.ValueDeltaUv.Value ?? 0,
-            NvApi.GetCoreVoltageBoostPercent(gpu));
-    }
+        => new(NvApi.GetCurveFreqDeltasKhz(gpu, NvApi.MaxCurveAnchors),
+            MemoryDelta(gpu, NvApi.GetPstates20(gpu)));
 
     /// <summary>Writes the snapshot back, in the order the driver requires (see
     /// <see cref="GpuTuning.Apply"/>): the pstate offsets first — that write re-derives the perf
-    /// table and wipes curve deltas — then the curve deltas, then the boost.</summary>
+    /// table and wipes curve deltas — then the curve deltas.</summary>
     public void Restore(IntPtr gpu)
     {
-        NvApi.SetPstate0Offsets(gpu, GraphicsDeltaKhz, MemoryDeltaKhz, CoreVoltageDeltaUv);
+        NvApi.SetPstate0Offsets(gpu, graphicsDeltaKhz: 0, MemoryDeltaKhz, coreVoltageDeltaUv: 0);
         NvApi.SetCurveFreqDeltasKhz(gpu, CurveDeltasKhz);
-        NvApi.SetCoreVoltageBoostPercent(gpu, VoltageBoostPercent);
     }
 
     /// <summary>The applied memory offset, via the read/write asymmetry documented on

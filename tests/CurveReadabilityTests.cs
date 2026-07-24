@@ -51,6 +51,16 @@ public class CurveReadabilityTests
     }
 
     [Fact]
+    public void AClockBeyondAnyRealCore_IsNotReadable()
+    {
+        // A garbage read or a crafted reference file: no real core clock exceeds the plausible
+        // ceiling, and refusing it here keeps every downstream delta computation in int range.
+        var curve = TestCurves.Realistic();
+        curve[19] = (curve[19].Mv, 2_000_000_000);
+        Assert.False(GpuTuning.CurveFreqsReadable(curve));
+    }
+
+    [Fact]
     public void ALowBoostMobileCurve_IsReadable()
     {
         // A power-limited mobile part can top out well below a desktop boost clock (1270 MHz here);

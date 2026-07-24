@@ -130,19 +130,22 @@ internal static class GpuTuning
         return ReadUntilFreqsReadable(gpu);
     }
 
-    /// <summary>The result of a <c>save-reference</c> capture: the stock curve, the log of what was
+    /// <summary>The result of a <c>set-reference-curve</c> capture: the stock curve, the log of what was
     /// done, and — when the applied tuning had to be reset and couldn't be put back — the restore
     /// failure the caller reports after saving the (still valid) reference.</summary>
     internal sealed record ReferenceCapture(IReadOnlyList<(int Mv, int Mhz)> Stock,
         IReadOnlyList<string> Log, string? RestoreFailure);
 
-    /// <summary>The stock curve a <c>save-reference</c> run captures. With a tuning applied the
-    /// true stock curve isn't observable (the driver re-shapes the effective curve around the
-    /// tuning, so the recovered live-minus-deltas curve can stay distorted), and a reference is
-    /// only worth saving when it is the real thing — so the applied state is snapshotted raw, the
-    /// card reset to stock for a direct read, and the identical raw state written back
-    /// (<see cref="AppliedTuning"/>). A capture that fails restores the tuning and throws; a
-    /// restore that fails falls back to stock rather than leave a partial tuning behind.</summary>
+    /// <summary>The stock curve a <c>set-reference-curve</c> run captures. The card is always
+    /// reset to stock for a direct read: with a tuning applied the true stock curve isn't
+    /// observable (the driver re-shapes the effective curve around the tuning, so the recovered
+    /// live-minus-deltas curve can stay distorted), and a knob only a foreign tool sets can shape
+    /// the read while this tool's own knobs all read stock — a P0 graphics offset moves the whole
+    /// reported curve with zero curve deltas, and skipping the reset would bake it into the
+    /// reference. The applied state is snapshotted raw first and the identical raw state written
+    /// back after (<see cref="AppliedTuning"/>; the reset leaves foreign knobs at stock, as
+    /// documented there). A capture that fails restores the tuning and throws; a restore that
+    /// fails falls back to stock rather than leave a partial tuning behind.</summary>
     public static ReferenceCapture CaptureStockForReference(IntPtr gpu)
     {
         IReadOnlyList<(int Mv, int Mhz)> curve = NvApi.GetVfCurve(gpu);
@@ -152,14 +155,11 @@ internal static class GpuTuning
         }
 
         AppliedTuning applied = AppliedTuning.Read(gpu);
-        if (applied.IsStock)
-        {
-            return new(ReadStockOrThrow(gpu), Array.Empty<string>(), null);
-        }
-
         var log = new List<string>
         {
-            "A tuning is applied - resetting to stock for the capture, restoring it after.",
+            applied.IsStock
+                ? "Resetting to stock for the capture."
+                : "A tuning is applied - resetting to stock for the capture, restoring it after.",
         };
 
         IReadOnlyList<(int Mv, int Mhz)> stock;
@@ -170,7 +170,7 @@ internal static class GpuTuning
             Clear(gpu);
             stock = ReadStockOrThrow(gpu);
         }
-        catch (Exception primary)
+        catch (Exception primary) when (!applied.IsStock)
         {
             // The capture failed - put the card back as found. Its own error is the one to surface;
             // a restore that also fails must not vanish behind it, so the two report together.
@@ -180,6 +180,12 @@ internal static class GpuTuning
             }
 
             throw;
+        }
+
+        if (applied.IsStock)
+        {
+            // Nothing to write back: the snapshot is all zeros, which the reset just wrote.
+            return new(stock, log, null);
         }
 
         string? failure = TryRestore(gpu, applied);
@@ -262,7 +268,10 @@ internal static class GpuTuning
         return curve;
     }
 
-    private static IReadOnlyList<(int Mv, int Mhz)> SubtractDeltas(
+    /// <summary>The stock curve recovered from a live read minus the applied per-anchor deltas. On a
+    /// tuned card the frequencies can carry the driver's re-shaping around the tuning (see
+    /// <see cref="RecoverStockReadOnly"/>); the voltage column is exact regardless.</summary>
+    internal static IReadOnlyList<(int Mv, int Mhz)> SubtractDeltas(
         IReadOnlyList<(int Mv, int Mhz)> curve, int[] deltas)
     {
         var stock = new List<(int Mv, int Mhz)>(curve.Count);
@@ -316,6 +325,98 @@ internal static class GpuTuning
         return ConfirmWrite(gpu, plan, targetMhz, referenceBaseline);
     }
 
+    /// <summary>
+    /// Writes a tuning document's offsets onto a fresh stock reset. There is no plan to build: the
+    /// anchors resolve against the live table (see
+    /// <see cref="TuningDocuments.ResolveCurveOffsetsKhz"/>; an absolute-clock anchor resolves its
+    /// offset against <paramref name="referenceStock"/> when one is saved, else the stock read) and
+    /// the deltas are applied as data, in the order the driver requires
+    /// (<see cref="AppliedTuning.Restore"/>). The document's anchors are matched against
+    /// <paramref name="live"/> — the caller's pre-reset read — before anything is written, so a
+    /// structurally foreign document refuses while the card still holds its current tuning; the
+    /// write itself resolves against the clean post-reset read and is confirmed against the
+    /// effective curve exactly like a planned one (<see cref="ConfirmWrite"/>), with a write that
+    /// provably didn't land reverting to stock and throwing. A document with no tuned anchors is
+    /// the memory-only tuning and applies as one, with no curve baseline to read or verify.
+    /// </summary>
+    public static IReadOnlyList<string> ApplyExact(IntPtr gpu, TuningDoc doc,
+        IReadOnlyList<(int Mv, int Mhz)>? referenceStock, IReadOnlyList<(int Mv, int Mhz)> live,
+        string what)
+    {
+        // Structural validation against the live table before the reset below wipes the applied
+        // tuning: the anchor voltages are power-state independent, so a document naming anchors
+        // this card can't hold refuses while the card still holds its current tuning. The
+        // resolved-clock bound waits for the post-reset resolution - measured against the tuned
+        // live clocks it would misjudge (an applied offset would count twice).
+        TuningDocuments.MatchAnchors(doc, live, what);
+
+        if (doc.Curve!.Length == 0)
+        {
+            return ApplyMemoryOnly(gpu, doc.MemoryOffset * 1000);
+        }
+
+        IReadOnlyList<(int Mv, int Mhz)> baseline = ResetAndReadVerificationBaseline(gpu);
+        int[] deltasKhz = TuningDocuments.ResolveCurveOffsetsKhz(doc, baseline,
+            () => referenceStock ?? baseline, what);
+        var tuning = new AppliedTuning(deltasKhz, doc.MemoryOffset * 1000);
+
+        try
+        {
+            tuning.Restore(gpu);
+        }
+        catch
+        {
+            // Don't leave a partial apply behind - the write's own error is the one to surface.
+            TryClear(gpu);
+            throw;
+        }
+
+        // The same below-the-boost-floor judgment the planned path makes from its plan's flat
+        // clock: a curve the document flattens below the floor can never read back clean, so it
+        // takes one read straight to the no-verdict path.
+        int topMhz = 0;
+        for (int i = 0; i < baseline.Count; i++)
+        {
+            topMhz = Math.Max(topMhz, baseline[i].Mhz + deltasKhz[i] / 1000);
+        }
+
+        return ConfirmWrite(gpu, DeriveChanges(baseline, deltasKhz),
+            pollForReadable: topMhz >= NvApi.MinBoostClockKhz / 1000, baseline,
+            (verdict, effective) => DescribeReplayResult(effective, verdict));
+    }
+
+    /// <summary>The applied deltas a curve anchor can name: anchor 0 is excluded (it has no
+    /// control entry, so its delta never lands), as are deltas past the visible curve (no anchor
+    /// voltage to name them by). The export (<see cref="TuningDocuments.MakeTuningDoc"/>) and the
+    /// replay verification (<see cref="DeriveChanges"/>) share this rule — the verification judges
+    /// exactly the changes the export promises.</summary>
+    internal static IEnumerable<(int Index, int DeltaKhz)> NameableTunedAnchors(int anchorCount,
+        int[] deltasKhz)
+    {
+        for (int i = 1; i < deltasKhz.Length && i < anchorCount; i++)
+        {
+            if (deltasKhz[i] != 0)
+            {
+                yield return (i, deltasKhz[i]);
+            }
+        }
+    }
+
+    /// <summary>The per-anchor changes a raw delta write makes to a stock curve — what
+    /// <see cref="VerifyWriteReachedCurve"/> checks for a replay, where no plan built them.</summary>
+    internal static IReadOnlyList<CurveChange> DeriveChanges(IReadOnlyList<(int Mv, int Mhz)> stock,
+        int[] deltasKhz)
+    {
+        var changes = new List<CurveChange>();
+        foreach ((int i, int deltaKhz) in NameableTunedAnchors(stock.Count, deltasKhz))
+        {
+            changes.Add(new CurveChange(stock[i].Mv, stock[i].Mhz,
+                stock[i].Mhz + (int)Math.Round(deltaKhz / 1000.0), deltaKhz));
+        }
+
+        return changes;
+    }
+
     /// <summary>Writes a memory-only tuning: resets everything to stock first (a real run sets the
     /// whole tuning state, exactly like the curve path's reset), then writes the memory offset. The
     /// curve is never read beyond <see cref="Clear"/>'s own guard, so this works at any power state.</summary>
@@ -355,12 +456,10 @@ internal static class GpuTuning
     internal readonly record struct CurveChange(int Mv, int OldMhz, int NewMhz, int NewDeltaKhz);
 
     /// <summary>The computed curve write: the per-point frequency deltas (kHz, index-aligned with the
-    /// curve), the cap anchor — the point the boost settles on — with its clock and the frequency
-    /// offset written there (<see cref="CapDeltaMhz"/>, 0 when the cap sits at the unwritable anchor
-    /// 0 — see <see cref="TuneRequest.ToPersistedArgs"/> for why the offset is what persists), the
-    /// flat top's start (<see cref="FlatMv"/>/<see cref="FlatMhz"/>: the anchor above the cap), and a
-    /// description of every point that moves.</summary>
-    internal sealed record CurvePlan(int CapMv, int CapMhz, int CapDeltaMhz, int FlatMv, int FlatMhz,
+    /// curve), the cap anchor — the point the boost settles on — with its clock, the flat top's start
+    /// (<see cref="FlatMv"/>/<see cref="FlatMhz"/>: the anchor above the cap), and a description of
+    /// every point that moves.</summary>
+    internal sealed record CurvePlan(int CapMv, int CapMhz, int FlatMv, int FlatMhz,
         IReadOnlyList<CurveChange> Changes, int[] DeltasKhz);
 
     /// <summary>
@@ -475,7 +574,7 @@ internal static class GpuTuning
             }
         }
 
-        return new CurvePlan(stock[k].Mv, newMhz[k], deltasKhz[k] / 1000,
+        return new CurvePlan(stock[k].Mv, newMhz[k],
             stock[flatten].Mv, newMhz[flatten], changes, deltasKhz);
     }
 
@@ -500,7 +599,10 @@ internal static class GpuTuning
     /// <summary>Whether the curve's frequency column is a clean, usable read. Around a power-state
     /// change the live status can briefly read back collapsed — sometimes wholesale (every clock tiny),
     /// sometimes dips in the steep idle->boost region. At a steady state, deep idle included, the read
-    /// passes. A usable read is a full, monotonic, plausible curve that reaches a boost clock.</summary>
+    /// passes. A usable read is a full, monotonic, plausible curve that reaches a boost clock and
+    /// stays below any real core clock — the upper bound also keeps every downstream delta
+    /// computation (whose kHz values scale the clocks by 1000) inside int range, so no plan or
+    /// document arithmetic needs to reason about overflow.</summary>
     public static bool CurveFreqsReadable(IReadOnlyList<(int Mv, int Mhz)> curve)
     {
         if (curve.Count < 16)
@@ -514,6 +616,11 @@ internal static class GpuTuning
             if (curve[i].Mhz < 100)
             {
                 return false; // a collapsed/garbage point
+            }
+
+            if (curve[i].Mhz > TuneRequest.MaxPlausibleCoreClockMhz)
+            {
+                return false; // beyond any real core clock - a garbage read or crafted file
             }
 
             if (i > 0 && curve[i].Mhz < curve[i - 1].Mhz - MaxBenignDipMhz)
@@ -621,6 +728,11 @@ internal static class GpuTuning
     /// against an intended clock tolerates this much noise (and a change smaller than it isn't real).</summary>
     private const int CurveBinMhz = 15;
 
+    /// <summary>The no-numbers report both write paths print when the post-apply read-back can't
+    /// be rendered.</summary>
+    private const string UncleanReadBackLine =
+        "Curve: the clock read-back wasn't clean (usually a power-state change mid-apply).";
+
     /// <summary>
     /// Reads the effective curve back to (1) verify the write actually reached it and (2) report the
     /// realized cap. The control table's byte offsets are hardware-specific and — unlike the status read,
@@ -633,43 +745,85 @@ internal static class GpuTuning
     /// </summary>
     private static IReadOnlyList<string> ConfirmWrite(IntPtr gpu, CurvePlan plan, int? targetMhz,
         IReadOnlyList<(int Mv, int Mhz)>? referenceBaseline)
+        // A curve legitimately flattened below the boost floor can never read clean, so it takes one
+        // read straight to the no-verdict path instead of waiting out the full poll window.
+        => ConfirmWrite(gpu, plan.Changes,
+            pollForReadable: plan.FlatMhz >= NvApi.MinBoostClockKhz / 1000, referenceBaseline,
+            (verdict, effective) => DescribeRealizedCap(effective, plan, targetMhz, verdict,
+                planFromReference: referenceBaseline is not null));
+
+    /// <summary>The confirmation skeleton the planned and replay writes share: read the effective
+    /// curve back, judge whether the write reached it, revert-and-throw on a proven miss, and hand
+    /// the verdict to <paramref name="describe"/> for the path's own report.</summary>
+    private static IReadOnlyList<string> ConfirmWrite(IntPtr gpu, IReadOnlyList<CurveChange> changes,
+        bool pollForReadable, IReadOnlyList<(int Mv, int Mhz)>? baseline,
+        Func<WriteVerification, IReadOnlyList<(int Mv, int Mhz)>, IReadOnlyList<string>> describe)
     {
-        IReadOnlyList<(int Mv, int Mhz)> effective;
+        var (effective, unreadableReport) = ReadBackEffective(gpu, pollForReadable);
+        if (effective is null)
+        {
+            return unreadableReport!;
+        }
+
+        WriteVerification verdict = VerifyWriteReachedCurve(changes, effective, baseline);
+        if (verdict == WriteVerification.NotReflected)
+        {
+            throw WriteNotReflectedError(gpu);
+        }
+
+        return describe(verdict, effective);
+    }
+
+    /// <summary>The replay counterpart of <see cref="DescribeRealizedCap"/>: a document names no
+    /// requested cap or clock target to compare against, so the report is the verdict and the
+    /// effective cap the write produced.</summary>
+    private static IReadOnlyList<string> DescribeReplayResult(
+        IReadOnlyList<(int Mv, int Mhz)> effective, WriteVerification verdict)
+    {
+        if (EffectiveCapPoint(effective) is not { } cap)
+        {
+            return new[] { UncleanReadBackLine };
+        }
+
+        string line = verdict == WriteVerification.Confirmed
+            ? "Confirming curve write: the offsets reached the effective curve"
+            : "Curve offsets written (no measurable reduction to verify the write against)";
+        return new[] { $"{line}; effective cap {cap.Mv} mV / {cap.Mhz} MHz." };
+    }
+
+    /// <summary>The effective read-back a write confirmation judges, or null with the no-verdict
+    /// report the caller returns as-is: a failed read-back is a read glitch, not positive evidence
+    /// the write missed (a layout mismatch reads back fine — just unchanged — and the verdict
+    /// catches it), so it must never revert. <paramref name="pollForReadable"/> rides out a
+    /// power-state transition like the pre-write read does — a collapsed read-back yields no
+    /// verdict, so polling keeps the confirmation real.</summary>
+    private static (IReadOnlyList<(int Mv, int Mhz)>? Effective, IReadOnlyList<string>? Report)
+        ReadBackEffective(IntPtr gpu, bool pollForReadable)
+    {
         try
         {
-            // Poll out a power-state transition like the pre-write read does: a collapsed read-back
-            // yields no verdict (see VerifyWriteReachedCurve), so riding out the transition keeps the
-            // confirmation real. A curve legitimately flattened below the boost floor can never read
-            // clean, so it takes one read straight to the no-verdict path instead of waiting out the
-            // full window.
-            effective = plan.FlatMhz < NvApi.MinBoostClockKhz / 1000
-                ? NvApi.GetVfCurve(gpu)
-                : ReadUntilFreqsReadable(gpu);
+            return (pollForReadable ? ReadUntilFreqsReadable(gpu) : NvApi.GetVfCurve(gpu), null);
         }
         catch (Exception ex)
         {
-            // A failed read-back is a read glitch, not positive evidence the write missed (a layout
-            // mismatch reads back fine — just unchanged — and is caught below), so don't revert on it.
-            return new[] { $"Curve: unreadable, can't confirm the write ({ex.Message}); verify with 'status'." };
+            return (null,
+                new[] { $"Curve: unreadable, can't confirm the write ({ex.Message}); verify with 'status'." });
         }
+    }
 
-        WriteVerification verdict = VerifyWriteReachedCurve(plan, effective, referenceBaseline);
-        if (verdict == WriteVerification.NotReflected)
-        {
-            // Undo the wrong write. Our zero-write hits the same reserved bytes the delta write did, and
-            // the real delta field was never touched, so stock is restored either way. The mismatch is
-            // the primary error - a revert that itself fails must not replace it.
-            string reverted = TryClear(gpu) is { } clearFailure
-                ? $"the revert to stock also failed ({clearFailure}), run 'clear'"
-                : "reverted to stock";
+    /// <summary>The refusal for a write the read-back proves never reached the curve. Undoes the
+    /// wrong write first: our zero-write hits the same reserved bytes the delta write did, and the
+    /// real delta field was never touched, so stock is restored either way. The mismatch is the
+    /// primary error - a revert that itself fails must not replace it.</summary>
+    private static CliError WriteNotReflectedError(IntPtr gpu)
+    {
+        string reverted = TryClear(gpu) is { } clearFailure
+            ? $"the revert to stock also failed ({clearFailure}), run 'clear'"
+            : "reverted to stock";
 
-            throw new CliError(
-                "The curve didn't change after writing, so the control-table offsets don't match this GPU "
-                + $"- {reverted}. {PortingDocPointer}");
-        }
-
-        return DescribeRealizedCap(effective, plan, targetMhz, verdict,
-            planFromReference: referenceBaseline is not null);
+        return new CliError(
+            "The curve didn't change after writing, so the control-table offsets don't match this GPU "
+            + $"- {reverted}. {PortingDocPointer}");
     }
 
     /// <summary>Whether the effective read-back reflects a curve write (see <see cref="VerifyWriteReachedCurve"/>).</summary>
@@ -707,6 +861,13 @@ internal static class GpuTuning
     internal static WriteVerification VerifyWriteReachedCurve(
         CurvePlan plan, IReadOnlyList<(int Mv, int Mhz)> effective,
         IReadOnlyList<(int Mv, int Mhz)>? liveStock = null)
+        => VerifyWriteReachedCurve(plan.Changes, effective, liveStock);
+
+    /// <summary>The change-list form of the cross-check above, for writes whose changes no plan
+    /// built — a replayed tuning's, derived by <see cref="DeriveChanges"/>.</summary>
+    internal static WriteVerification VerifyWriteReachedCurve(
+        IReadOnlyList<CurveChange> changes, IReadOnlyList<(int Mv, int Mhz)> effective,
+        IReadOnlyList<(int Mv, int Mhz)>? liveStock = null)
     {
         // A collapsed (transitional) read-back can't be judged either way: every clock reads far below
         // stock, so each reduction would count as "moved" and a missed write would pass as landed. No
@@ -724,11 +885,17 @@ internal static class GpuTuning
             return WriteVerification.Unverifiable;
         }
 
-        Dictionary<int, int>? stockByMv = liveStock is null ? null : ByVoltage(liveStock);
-        Dictionary<int, int> effectiveByMv = ByVoltage(effective);
+        Dictionary<int, int>? stockByMv = null;
+        HashSet<int>? stockAmbiguous = null;
+        if (liveStock is not null)
+        {
+            (stockByMv, stockAmbiguous) = IndexByVoltage(liveStock);
+        }
+
+        var (effectiveByMv, effectiveAmbiguous) = IndexByVoltage(effective);
 
         int checkable = 0, moved = 0;
-        foreach (CurveChange c in plan.Changes)
+        foreach (CurveChange c in changes)
         {
             // Judge only reductions of at least one bin: a smaller written delta (near the top of a
             // real curve the anchors sit only 7-8 MHz apart) can never register as moved against the
@@ -736,6 +903,15 @@ internal static class GpuTuning
             // a spurious revert. The written delta says this independently of which curve the plan
             // measured from, so a reference-planned run is filtered the same way.
             if (c.NewDeltaKhz > -CurveBinMhz * 1000)
+            {
+                continue;
+            }
+
+            // A millivolt that repeats in the table can't be attributed to one anchor by voltage,
+            // so judging it would measure a same-mV neighbour's clock - enough to convict a landed
+            // write when such an anchor is the only checkable change. It yields no judgment; the
+            // unique millivolts carry the verdict.
+            if (effectiveAmbiguous.Contains(c.Mv) || stockAmbiguous?.Contains(c.Mv) == true)
             {
                 continue;
             }
@@ -776,19 +952,23 @@ internal static class GpuTuning
         return moved * 2 >= checkable ? WriteVerification.Confirmed : WriteVerification.Unverifiable;
     }
 
-    /// <summary>A voltage -> frequency map over a curve, keeping the first of any anchors that truncate
-    /// to the same millivolt: that is the one a plan change at that millivolt targeted. (The plan treats
-    /// adjacent anchors near-identically, so judging against a same-mV neighbour is close enough for the
-    /// majority vote above.)</summary>
-    private static Dictionary<int, int> ByVoltage(IReadOnlyList<(int Mv, int Mhz)> curve)
+    /// <summary>A voltage -> frequency map over a curve, plus the set of millivolts more than one
+    /// anchor truncates to — those can't be attributed to one anchor by voltage, so the verdict
+    /// above skips them rather than judge against a neighbour's clock.</summary>
+    private static (Dictionary<int, int> ClockByMv, HashSet<int> Ambiguous) IndexByVoltage(
+        IReadOnlyList<(int Mv, int Mhz)> curve)
     {
         var byMv = new Dictionary<int, int>();
+        var ambiguous = new HashSet<int>();
         foreach (var (mv, mhz) in curve)
         {
-            byMv.TryAdd(mv, mhz);
+            if (!byMv.TryAdd(mv, mhz))
+            {
+                ambiguous.Add(mv);
+            }
         }
 
-        return byMv;
+        return (byMv, ambiguous);
     }
 
     /// <summary>The curve's effective cap point — where the boost settles under load: the anchor just
@@ -856,8 +1036,7 @@ internal static class GpuTuning
         // reached", so skip the readout rather than print a misleading cap.
         if (!CurveFreqsReadable(effective) || RealizedCapPoint(effective, plan.CapMv) is not { } cap)
         {
-            return new[] { "Curve: the clock read-back wasn't clean (usually a power-state change "
-                           + "mid-apply)." };
+            return new[] { UncleanReadBackLine };
         }
 
         // Only a confirmed verdict may read as one: a plan with nothing measurable to check (a pure

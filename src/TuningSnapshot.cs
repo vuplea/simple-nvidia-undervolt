@@ -64,12 +64,20 @@ internal sealed class TuningSnapshot
             return "stock";
         }
 
+        string range = DescribeOffsetsRange(offsets);
+        return EffectiveCap is { } cap ? $"{range}, capped at {cap.Mv} mV / {cap.Mhz} MHz" : range;
+    }
+
+    /// <summary>The applied-offsets range as one phrase — shared by the status line and a replay's
+    /// pre-apply summary, so the two renderings of the same state can't drift apart. Only for a
+    /// non-empty offsets array.</summary>
+    public static string DescribeOffsetsRange(int[] offsets)
+    {
         int minMhz = offsets.Min() / 1000;
         int maxMhz = offsets.Max() / 1000;
-        string range = minMhz == maxMhz
+        return minMhz == maxMhz
             ? $"{minMhz:+0;-0} MHz on {offsets.Length} point(s)"
             : $"{minMhz:+0;-0}..{maxMhz:+0;-0} MHz across {offsets.Length} point(s)";
-        return EffectiveCap is { } cap ? $"{range}, capped at {cap.Mv} mV / {cap.Mhz} MHz" : range;
     }
 
     public string DescribeMemoryClock()

@@ -1,8 +1,8 @@
 namespace SimpleNvidiaUndervolt.Tests;
 
-/// <summary>Tests for the logon-task registration: the command line it runs — the resolved undervolt
-/// (from <see cref="TuneRequest.ToPersistedArgs"/>) plus the fixed flags an unattended,
-/// already-elevated re-apply needs — and how it is built and read back.</summary>
+/// <summary>Tests for the logon-task registration: the command line it runs — the replay of the
+/// persisted tuning plus the fixed flags an unattended, already-elevated re-apply needs — and how
+/// it is built and read back.</summary>
 public class PersistenceTests
 {
     // --- reading the registered task back ('status' shows what re-applies at logon) ---
@@ -16,14 +16,13 @@ public class PersistenceTests
               <Actions Context="Author">
                 <Exec>
                   <Command>"C:\Program Files\simple-nvidia-undervolt\simple-nvidia-undervolt.exe"</Command>
-                  <Arguments>--mv 960 --mhz-offset 190 --peak-mv 960 --no-persist --silent</Arguments>
+                  <Arguments>--apply-persisted --no-persist --silent</Arguments>
                 </Exec>
               </Actions>
             </Task>
             """;
 
-        Assert.Equal("--mv 960 --mhz-offset 190 --peak-mv 960 --no-persist --silent",
-            Persistence.ParseTaskArguments(xml));
+        Assert.Equal("--apply-persisted --no-persist --silent", Persistence.ParseTaskArguments(xml));
     }
 
     [Fact]
@@ -75,14 +74,13 @@ public class PersistenceTests
     // --- the registered command line (schtasks' /TR value) ---
 
     [Fact]
-    public void BuildTaskRun_QuotesTheExeAndAppendsTheUnattendedFixedFlags()
+    public void BuildTaskRun_QuotesTheExeAndCarriesTheApplyAndUnattendedFixedFlags()
     {
         string run = Persistence.BuildTaskRun(
-            @"C:\Program Files\simple-nvidia-undervolt\simple-nvidia-undervolt.exe",
-            new[] { "--mv", "960" });
+            @"C:\Program Files\simple-nvidia-undervolt\simple-nvidia-undervolt.exe");
 
         Assert.Equal("\"C:\\Program Files\\simple-nvidia-undervolt\\simple-nvidia-undervolt.exe\" "
-                     + "--mv 960 --no-persist --silent", run);
+                     + "--apply-persisted --no-persist --silent", run);
     }
 
     [Fact]
@@ -91,7 +89,7 @@ public class PersistenceTests
         // schtasks rejects a /TR over 261 characters with an error that doesn't say so; the build
         // must fail with the real reason instead.
         string deepExe = @"C:\" + new string('x', 300) + @"\simple-nvidia-undervolt.exe";
-        Assert.Throws<CliError>(() => Persistence.BuildTaskRun(deepExe, new[] { "--mv", "960" }));
+        Assert.Throws<CliError>(() => Persistence.BuildTaskRun(deepExe));
     }
 
     // --- finding the task in schtasks' CSV listing (how a missing task is told from a query failure) ---

@@ -41,6 +41,15 @@ internal static class App
     /// <summary>A number as a command-line argument — invariant, like every number this CLI parses.</summary>
     public static string Arg(int value) => value.ToString(CultureInfo.InvariantCulture);
 
+    /// <summary>The absolute P0 memory clock, which moves with an applied memory offset — what the
+    /// memory round-trip assertions compare. Fails the test on an unreadable clock.</summary>
+    public static int ReadMemoryClockKhz(IntPtr gpu)
+    {
+        Reading<int> clock = TuningSnapshot.Read(gpu).MemoryClockKhz;
+        Assert.True(clock.Ok, clock.Error);
+        return clock.Value;
+    }
+
     /// <summary>The built executable, found by walking up from the test output to the repo's src/bin.</summary>
     public static string ExePath()
     {

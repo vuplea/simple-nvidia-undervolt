@@ -327,7 +327,7 @@ card is power-limited at stock (130 W, +15% slider), so memory is the perf-boost
 Apply a profile with the card cooled down (idle desktop, not right after a gaming session). The
 tuning resolves against the live curve, which shifts slightly with temperature, so applying hot
 bakes in a slightly different tuning than applying cold. Or run
-`simple-nvidia-undervolt save-reference` once (idle and cool) and the temperature stops mattering:
+`simple-nvidia-undervolt set-reference-curve` once (idle and cool) and the temperature stops mattering:
 tuning then resolves against the saved stock curve instead of the live one.
 
 ## If something goes wrong

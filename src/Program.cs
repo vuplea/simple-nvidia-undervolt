@@ -133,10 +133,10 @@ internal static class Cli
 
             case "install": return RunInstallCommand(args, isRelayChild);
             case "clear": return RunClearCommand(args, isRelayChild);
-            case "save-reference": return RunWriteCommand(args, isRelayChild, () => OnFirstGpu(RunSaveReference));
+            case "set-reference-curve": return RunSetReferenceCommand(args, isRelayChild);
             case "watch": return RunWatchCommand(args);
 
-            case "status": return RunGpuCommand(args, RunStatus);
+            case "status": return RunStatusCommand(args);
             case "snapshot": return RunGpuCommand(args, Diagnostics.Snapshot);
             case "diff": return RunGpuCommand(args, Diagnostics.Diff);
             case "curve": return RunGpuCommand(args, Diagnostics.Curve);
@@ -186,11 +186,24 @@ internal static class Cli
         return RunWriteCommand(args, isRelayChild, RunClear);
     }
 
-    /// <summary>A write command whose only option is <c>--no-elevate</c> (install, clear,
-    /// save-reference); tune owns a richer option set and calls the overload below itself.</summary>
+    /// <summary>A write command whose only option is <c>--no-elevate</c> (install, clear);
+    /// tune and set-reference-curve own richer option sets and call the overload below themselves.</summary>
     private static int RunWriteCommand(string[] args, bool isRelayChild, Action run)
         => RunWriteCommand(args, isRelayChild,
             Args.Global.WithBare("--no-elevate").Parse(args).Has("--no-elevate"), run);
+
+    /// <summary>'set-reference-curve': saves the stock V/F curve as the tuning reference — captured
+    /// from the card, or imported from a previously exported curve file — optionally exporting the
+    /// result.</summary>
+    private static int RunSetReferenceCommand(string[] args, bool isRelayChild)
+    {
+        Args.Parsed parsed = Args.Global.WithBare("--no-elevate")
+            .WithValue("--in-curve-file", "--out-curve-file").Parse(args);
+        string? inFile = parsed.FilePath("--in-curve-file");
+        string? outFile = parsed.FilePath("--out-curve-file");
+        return RunWriteCommand(args, isRelayChild, parsed.Has("--no-elevate"),
+            () => OnFirstGpu(gpu => RunSetReference(gpu, inFile, outFile)));
+    }
 
     private static int RunWatchCommand(string[] args)
     {
@@ -284,7 +297,17 @@ internal static class Cli
         }
     }
 
-    private static void RunStatus(IntPtr gpu)
+    /// <summary>'status', plus its optional applied-tuning export. Read-only against the GPU (the
+    /// export writes a user file), so it never elevates.</summary>
+    private static int RunStatusCommand(string[] args)
+    {
+        Args.Parsed parsed = Args.Global.WithValue("--out-tuning-file").Parse(args);
+        string? outTuningFile = parsed.FilePath("--out-tuning-file");
+        OnFirstGpu(gpu => RunStatus(gpu, outTuningFile));
+        return 0;
+    }
+
+    private static void RunStatus(IntPtr gpu, string? outTuningFile)
     {
         // The Task Scheduler query spawns a slow child process and is independent of the GPU reads -
         // run it alongside them.
@@ -313,6 +336,43 @@ internal static class Cli
         {
             // Couldn't read the curve at all; the offset readings above already reflect that.
         }
+
+        // The export comes after the report, so a file the environment refuses doesn't hide it.
+        if (outTuningFile is not null)
+        {
+            foreach (string line in ExportAppliedTuning(gpu, outTuningFile))
+            {
+                Console.WriteLine($"  {line}");
+            }
+        }
+    }
+
+    /// <summary>Exports the applied tuning — the knobs this tool tunes (see
+    /// <see cref="AppliedTuning"/>), each tuned anchor named by its voltage on the stock curve: the
+    /// saved reference when it is usable for this card, else the stock curve recovered
+    /// live-minus-deltas. The file re-applies with 'tune --in-tuning-file'.</summary>
+    private static IReadOnlyList<string> ExportAppliedTuning(IntPtr gpu, string path)
+    {
+        IReadOnlyList<(int Mv, int Mhz)> live = NvApi.GetVfCurve(gpu);
+        if (!GpuTuning.CurveVoltsPlausible(live))
+        {
+            throw GpuTuning.UnrecognizedCurveError(gpu, "export the applied tuning");
+        }
+
+        AppliedTuning applied = AppliedTuning.Read(gpu);
+        IReadOnlyList<(int Mv, int Mhz)> stock = ReferenceCurve.Match(gpu).Curve
+                                                 ?? GpuTuning.SubtractDeltas(live, applied.CurveDeltasKhz);
+
+        TuningDoc doc = TuningDocuments.MakeTuningDoc(GpuIdentity.Read(gpu), stock, applied);
+        var log = new List<string>();
+        if (applied.IsStock)
+        {
+            log.Add("Note: the applied tuning is stock - the export holds no offsets.");
+        }
+
+        log.Add(TuningDocuments.WriteFile(path, TuningDocuments.Render(doc), "the applied tuning")
+                + " Re-apply it with 'tune --in-tuning-file'.");
+        return log;
     }
 
     /// <summary>'clear' resets the GPU and removes the persisted re-apply, as two independent halves:
@@ -343,6 +403,10 @@ internal static class Cli
         try
         {
             Console.WriteLine($"  {Persistence.RemoveLogonTask()}");
+            if (PersistedTuning.Remove())
+            {
+                Console.WriteLine("  Removed the persisted tuning file.");
+            }
         }
         catch (Exception ex)
         {
@@ -355,30 +419,47 @@ internal static class Cli
         }
     }
 
-    /// <summary>'save-reference' captures the stock V/F curve into the registry, keyed to this GPU
-    /// (see <see cref="ReferenceCurve"/>); tuning then plans from it instead of a live read, so the
-    /// same command always produces the same tuning. An applied tuning is reset for the capture and
-    /// restored right after (see <see cref="GpuTuning.CaptureStockForReference"/>) — with the GPU
-    /// writes that involves, plus the HKLM write, it elevates like the other write commands.</summary>
-    private static void RunSaveReference(IntPtr gpu)
+    /// <summary>'set-reference-curve' saves the stock V/F curve keyed to this GPU (see
+    /// <see cref="ReferenceCurve"/>); tuning then plans from it instead of a live read, so the
+    /// same command always produces the same tuning. The curve comes from a capture — an applied
+    /// tuning is reset for it and restored right after (see
+    /// <see cref="GpuTuning.CaptureStockForReference"/>); with the GPU writes that involves, plus
+    /// the install-directory write, the command elevates like the other write commands — or, with
+    /// <c>--in-curve-file</c>, from a previously exported file, validated against the live card
+    /// here so a wrong file fails now rather than as a silent live-planning fallback at tune time.
+    /// <c>--out-curve-file</c> additionally exports the document just stored.</summary>
+    private static void RunSetReference(IntPtr gpu, string? inFile, string? outFile)
     {
-        Console.WriteLine($"Saving the reference curve for {NvApi.SafeFullName(gpu)}:");
+        Console.WriteLine($"Setting the reference curve for {NvApi.SafeFullName(gpu)}:");
         WarnIfNotElevated();
 
+        ReferenceCurveDoc doc = inFile is null ? CaptureReference(gpu, outFile) : ImportReference(gpu, inFile);
+        Console.WriteLine("  Tuning now plans from this curve; re-run 'set-reference-curve' to refresh it.");
+
+        if (outFile is not null)
+        {
+            Console.WriteLine($"  {TuningDocuments.WriteFile(outFile, TuningDocuments.Render(doc), "the reference curve")}");
+        }
+    }
+
+    /// <summary>Captures the stock curve from the card and saves it as the reference.</summary>
+    private static ReferenceCurveDoc CaptureReference(IntPtr gpu, string? outFile)
+    {
         // Read the identity before the capture: the capture can reset the tuning and fail to put it
         // back, and a later step throwing must not be how the user finds out - it would report the
-        // registry or identity error alone and never mention the tuning it lost.
+        // save or identity error alone and never mention the tuning it lost.
         GpuIdentity identity = GpuIdentity.Read(gpu);
         GpuTuning.ReferenceCapture capture = GpuTuning.CaptureStockForReference(gpu);
         PrintIndented(capture.Log);
 
+        ReferenceCurveDoc doc;
         try
         {
             int? tempC = TryReadTemperatureC(gpu);
-            ReferenceCurve.Save(identity, capture.Stock, tempC);
+            doc = TuningDocuments.MakeReferenceCurveDoc(identity, capture.Stock, tempC);
+            ReferenceCurve.Save(doc);
             Console.WriteLine($"  Saved {capture.Stock.Count} stock points"
                               + $"{(tempC is { } t ? $", captured at {t} C" : string.Empty)}.");
-            Console.WriteLine("  Tuning now plans from this curve; re-run 'save-reference' to refresh it.");
         }
         catch (Exception ex) when (capture.RestoreFailure is not null)
         {
@@ -387,12 +468,45 @@ internal static class Cli
         }
 
         // The reference itself is good (it is stock data, unaffected by the restore), so it stays
-        // saved - but the run must still fail loudly: the user's tuning is no longer applied.
+        // saved - but the run must still fail loudly: the user's tuning is no longer applied. The
+        // requested export is skipped; re-running the command after the re-tune produces it.
         if (capture.RestoreFailure is { } failure)
         {
-            throw new CliError($"The reference was saved, but {failure}.\n"
-                               + "Re-run your tune command or profile shortcut.");
+            throw new CliError($"The reference was saved{(outFile is null ? string.Empty : " (but not exported)")}, "
+                               + $"but {failure}.\nRe-run your tune command or profile shortcut.");
         }
+
+        return doc;
+    }
+
+    /// <summary>Saves a previously exported curve file as this machine's reference, validated
+    /// against the live card here — a usable frequency column and a match on identity and anchors —
+    /// so a wrong file fails now rather than as a silent live-planning fallback at tune time.</summary>
+    private static ReferenceCurveDoc ImportReference(IntPtr gpu, string inFile)
+    {
+        ReferenceCurveDoc doc = TuningDocuments.ReadReferenceCurveFile(inFile);
+        IReadOnlyList<(int Mv, int Mhz)> points = TuningDocuments.Points(doc);
+        if (!GpuTuning.CurveFreqsReadable(points))
+        {
+            throw new CliError($"{inFile}: the curve's frequency column isn't usable - re-export it.");
+        }
+
+        if (TuningDocuments.RequireMatchesGpu(doc.GpuName, doc.GpuPciIds, gpu,
+                $"The curve file {inFile}") is { } warning)
+        {
+            Console.WriteLine($"  {warning}");
+        }
+
+        if (!ReferenceCurve.AnchorsMatch(points, NvApi.GetVfCurve(gpu)))
+        {
+            throw new CliError($"The curve file {inFile} doesn't match this GPU's curve anchors "
+                               + "(driver or vBIOS change since the capture?) - re-export it.");
+        }
+
+        ReferenceCurve.Save(doc);
+        Console.WriteLine($"  Reference set from {inFile} ({points.Count} stock points, "
+                          + $"{TuningDocuments.DescribeCapture(doc.SavedAt)}).");
+        return doc;
     }
 
     /// <summary>Best-effort: the temperature is a capture-condition detail recorded with the
@@ -422,10 +536,13 @@ internal static class Cli
 
     private static void RunTune(IntPtr gpu, TuneRequest request, string? launchingLnk)
     {
-        Console.WriteLine(request.DryRun
-            ? $"Dry run for {NvApi.SafeFullName(gpu)} - nothing will be written:"
-            : $"Tuning {NvApi.SafeFullName(gpu)}:");
+        if (request.IsReplay)
+        {
+            RunReplay(gpu, request);
+            return;
+        }
 
+        PrintRunHeader(gpu, request);
         if (!request.DryRun)
         {
             WarnIfNotElevated();
@@ -433,6 +550,7 @@ internal static class Cli
 
         GpuTuning.CurvePlan? plan = null;
         int? targetMhz = null;
+        IReadOnlyList<(int Mv, int Mhz)>? planStock = null;
         IReadOnlyList<(int Mv, int Mhz)>? referenceBaseline = null;
         if (request.Mv.IsSet)
         {
@@ -468,6 +586,7 @@ internal static class Cli
 
             // Build the plan before the memory/curve writes: it needs a clean curve read, so a collapsed
             // (transitional) read fails here instead of after a partial apply.
+            planStock = stock;
             int requestedCapMv;
             (requestedCapMv, targetMhz) = request.Resolve(stock);
             plan = GpuTuning.BuildCurvePlan(stock, requestedCapMv, targetMhz, request.CapPoints);
@@ -475,9 +594,8 @@ internal static class Cli
             Console.WriteLine(targetMhz is { } f ? $"  Frequency: {f} MHz" : "  Frequency: stock clock");
         }
 
-        // The absolute memory clock and the delta to write. The absolute clock is also what the logon
-        // task re-applies: its reference (the factory base clock) is static, so unlike the curve
-        // clock it can't drift between runs (see ToPersistedArgs).
+        // The absolute memory clock (what the run reports) and the delta to write - the delta is
+        // also what the tuning document carries.
         (int TargetMhz, int DeltaKhz)? memory = null;
         if (request.Mem.IsSet)
         {
@@ -528,8 +646,17 @@ internal static class Cli
             }
         }
 
+        // The run's resolved tuning as a document - what persistence stores and --out-tuning-file
+        // writes. Built once; the plan's stock curve names the tuned anchors, and a memory-only run
+        // has none to name, so it needs no curve at all.
+        TuningDoc? runDoc = null;
+        TuningDoc RunDoc() => runDoc ??= TuningDocuments.MakeTuningDoc(GpuIdentity.Read(gpu),
+            planStock ?? Array.Empty<(int Mv, int Mhz)>(),
+            new AppliedTuning(plan?.DeltasKhz ?? Array.Empty<int>(), memory?.DeltaKhz ?? 0));
+
         if (request.DryRun)
         {
+            ExportTuningFile(request, RunDoc);
             return;
         }
 
@@ -541,31 +668,167 @@ internal static class Cli
             PrintIndented(Shortcut.MarkActive(liveLnk));
         }
 
+        FinishRealRun(request, RunDoc);
+    }
+
+    private static void PrintRunHeader(IntPtr gpu, TuneRequest request)
+        => Console.WriteLine(request.DryRun
+            ? $"Dry run for {NvApi.SafeFullName(gpu)} - nothing will be written:"
+            : $"Tuning {NvApi.SafeFullName(gpu)}:");
+
+    /// <summary>Writes the run's tuning document to <c>--out-tuning-file</c> when asked. The export
+    /// mirrors the shortcut: on a dry run the file is the deliverable, after a real apply it records
+    /// the exact tuning that landed.</summary>
+    private static void ExportTuningFile(TuneRequest request, Func<TuningDoc> doc)
+    {
+        if (request.OutTuningFile is { } outFile)
+        {
+            Console.WriteLine(TuningDocuments.WriteFile(outFile, TuningDocuments.Render(doc()), "the tuning"));
+        }
+    }
+
+    /// <summary>A real run's shared tail — persist, export, sign off — for the planned and replay
+    /// paths alike. <paramref name="doc"/> is a factory so a run that neither persists nor exports
+    /// never builds the document.</summary>
+    private static void FinishRealRun(TuneRequest request, Func<TuningDoc> doc)
+    {
         if (request.Persist)
         {
-            try
-            {
-                if (Persistence.InstallApp())
-                {
-                    Console.WriteLine($"Installed to {Persistence.InstallDir()}.");
-                }
-
-                Console.WriteLine(Persistence.RegisterLogonTask(request.ToPersistedArgs(
-                    plan?.CapMv, targetMhz is null ? null : plan?.CapDeltaMhz, memory?.TargetMhz)));
-            }
-            catch (Exception ex)
-            {
-                throw new CliError(
-                    $"The undervolt is applied and active, but persistence failed: {ErrorReporter.Describe(ex)}\n"
-                    + "It will not re-apply at logon. Re-run the command to retry persistence, or pass "
-                    + "--no-persist to apply this session only.");
-            }
+            PersistTuning(doc());
         }
+
+        ExportTuningFile(request, doc);
 
         Console.WriteLine();
         Console.WriteLine(request.Persist
             ? "Done. Use 'clear' to restore stock and stop re-applying at logon."
             : "Done (not persisted). Use 'clear' to restore stock; omit --no-persist to re-apply at logon.");
+    }
+
+    /// <summary>Persists a tuning document for the logon re-apply: installs the app, stores the
+    /// document as a file beside it (see <see cref="PersistedTuning"/>) and registers the logon
+    /// task that applies it. A failure here must not read as a failed tuning — the caller's apply
+    /// is live — so it reports as its own anticipated error with the retry guidance.</summary>
+    private static void PersistTuning(TuningDoc doc)
+    {
+        try
+        {
+            if (Persistence.InstallApp())
+            {
+                Console.WriteLine($"Installed to {Persistence.InstallDir()}.");
+            }
+
+            PersistedTuning.Save(doc);
+            Console.WriteLine($"Saved the tuning to apply at logon: {PersistedTuning.FilePath()}");
+            Console.WriteLine(Persistence.RegisterLogonTask());
+        }
+        catch (Exception ex)
+        {
+            // "May": a still-registered task from an earlier persist re-applies whatever the store
+            // holds now, so neither "will" nor "won't" would be honest across the partial states.
+            throw new CliError(
+                $"The tuning is applied and active, but persistence failed: {ErrorReporter.Describe(ex)}\n"
+                + "The logon re-apply may be missing or stale. Re-run the command to retry "
+                + "persistence, or pass --no-persist to apply this session only.");
+        }
+    }
+
+    /// <summary>A replay run: re-applies a stored tuning document — a file the user named, or the
+    /// persisted tuning file the logon task consumes — offsets as data, no planning. The document
+    /// is validated against the live card first — the identity fields it names, and every tuned
+    /// anchor's voltage against the live table — so a foreign or stale one fails as a named error
+    /// before anything is written.</summary>
+    private static void RunReplay(IntPtr gpu, TuneRequest request)
+    {
+        PrintRunHeader(gpu, request);
+
+        (TuningDoc doc, string source) = request.InTuningFile is { } file
+            ? (TuningDocuments.ReadTuningFile(file), $"the tuning file {file}")
+            : (PersistedTuning.Load(), $"the persisted tuning ({PersistedTuning.FilePath()})");
+        Console.WriteLine($"  Re-applying the tuning from {source} "
+                          + $"({TuningDocuments.DescribeCapture(doc.SavedAt)}).");
+
+        string what = $"The tuning from {source}";
+        if (TuningDocuments.RequireMatchesGpu(doc.GpuName, doc.GpuPciIds, gpu, what) is { } warning)
+        {
+            Console.WriteLine($"  {warning}");
+        }
+
+        // The write path refuses an unrecognized card on its own; checking here puts the refusal
+        // before any output that reads like progress. The live read also backs the anchor and
+        // absolute-clock resolution below - the voltage column is valid at any power state.
+        IReadOnlyList<(int Mv, int Mhz)> live = NvApi.GetVfCurve(gpu);
+        if (!GpuTuning.CurveVoltsPlausible(live))
+        {
+            throw GpuTuning.UnrecognizedCurveError(gpu, "apply the tuning");
+        }
+
+        // The same plausibility bound the planned path puts on a requested memory clock - a replay
+        // must not write a memory offset no plan could have produced.
+        if (doc.MemoryOffset != 0)
+        {
+            int baseMemMhz = GpuTuning.BaseMemoryClockMhz(gpu);
+            TuneRequest.RequirePlausibleMemoryClock(baseMemMhz + (long)doc.MemoryOffset, baseMemMhz);
+        }
+
+        ReferenceCurve.MatchResult reference = ReferenceCurve.Match(gpu);
+
+        // The reference state matters to a replay only when an anchor must resolve its offset from
+        // an absolute clock; the common all-offsets replay stays quiet about it.
+        if (doc.Curve!.Any(e => e.Offset is null))
+        {
+            Console.WriteLine($"  {reference.Note}");
+        }
+
+        PrintIndented(DescribeTuningDoc(doc));
+
+        if (request.DryRun)
+        {
+            // Resolving against the live table validates every anchor and, for absolute-clock
+            // entries, the offset derivation - read-only, like the rest of the dry run. A real run
+            // re-resolves against the clean post-reset read inside ApplyExact.
+            TuningDocuments.ResolveCurveOffsetsKhz(doc, live,
+                () => reference.Curve ?? GpuTuning.RecoverStockReadOnly(gpu), what);
+            Console.WriteLine("  [dry run] Would reset to stock and write these offsets.");
+            ExportTuningFile(request, () => doc);
+            return;
+        }
+
+        WarnIfNotElevated();
+        PrintIndented(GpuTuning.ApplyExact(gpu, doc, reference.Curve, live, what));
+        FinishRealRun(request, () => doc);
+    }
+
+    /// <summary>The document's tuning, summarized before the apply the way status renders an
+    /// applied tuning, so the user sees what the replay writes.</summary>
+    private static IReadOnlyList<string> DescribeTuningDoc(TuningDoc doc)
+    {
+        var lines = new List<string>();
+        int[] offsetsKhz = doc.Curve!.Where(e => e.Offset is not null)
+            .Select(e => e.Offset!.Value * 1000).ToArray();
+        if (offsetsKhz.Length > 0)
+        {
+            lines.Add($"Core curve offset: {TuningSnapshot.DescribeOffsetsRange(offsetsKhz)}");
+        }
+
+        int absoluteClocks = doc.Curve!.Count(e => e.Offset is null);
+        if (absoluteClocks > 0)
+        {
+            lines.Add($"Core curve: {absoluteClocks} anchor(s) at absolute clocks, offsets resolved "
+                      + "against the stock curve at apply.");
+        }
+
+        if (doc.MemoryOffset != 0)
+        {
+            lines.Add($"Memory clock offset: {doc.MemoryOffset:+0;-0} MHz");
+        }
+
+        if (lines.Count == 0)
+        {
+            lines.Add("The exported tuning is stock - replaying it resets everything to stock.");
+        }
+
+        return lines;
     }
 
     private static string DescribeVoltageCap(int requestedMv, int actualMv)
@@ -595,17 +858,22 @@ internal static class Cli
             install               Copy the app to Program Files, so saved or pre-made profile shortcuts
                                   work. (A persisting tune installs too; this is the standalone form.)
             status                Show curve offset, memory clock, voltage boost, and logon re-apply.
+                                  --out-tuning-file <f> exports the applied tuning as JSON - the
+                                  tuned curve anchors, keyed by voltage, plus the memory offset -
+                                  re-appliable with 'tune --in-tuning-file'.
             watch                 Poll live core voltage/clock/temp/power, tracking the max
                                   (--interval <seconds> to change the 1s poll; Ctrl+C to stop).
             clear                 Reset all tuning to stock and remove logon re-apply.
-            save-reference        Save the stock V/F curve (best captured idle and cool) as the tuning
+            set-reference-curve   Save the stock V/F curve (best captured idle and cool) as the tuning
                                   reference: tuning then plans from it instead of the live curve, whose
                                   thermal shift otherwise drifts the result between runs. An applied
                                   tuning is reset for the capture and restored right after.
+                                  --in-curve-file <f> sets it from an exported file instead of
+                                  capturing; --out-curve-file <f> also exports it as JSON.
 
             'status' and 'watch' are read-only and need no elevation. Tuning, 'clear', 'install' and
-            'save-reference' need administrator rights; if run from a normal terminal they prompt for
-            elevation.
+            'set-reference-curve' need administrator rights; if run from a normal terminal they prompt
+            for elevation.
 
             Tuning options:
             Voltage cap, pick preferred syntax (required to provide, unless tuning just the memory clock):
@@ -626,11 +894,17 @@ internal static class Cli
             Other:
               --cap-points <n>  Curve anchors holding the cap's offset, counting down from the cap.
                                 1 = only the cap point (default 25).
+              --in-tuning-file <f>
+                                Re-apply an exported tuning file exactly (excludes the other tuning
+                                options).
+              --out-tuning-file <f>
+                                Also export the run's tuning as JSON; with --dry-run, export
+                                without applying.
               --no-persist      Don't persist; by default a real run re-applies at logon.
               --save-shortcut [name]
                                 Drop a .lnk (specify name/path, otherwise auto-generated).
               --dry-run         Compute and print the curve changes without writing.
-              --no-elevate      Disable auto-elevation ('clear', 'install' and 'save-reference'
+              --no-elevate      Disable auto-elevation ('clear', 'install' and 'set-reference-curve'
                                 accept it too).
 
             Options:

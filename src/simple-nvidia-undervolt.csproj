@@ -26,6 +26,13 @@
     <!-- 'dotnet publish' produces a standalone native binary (no .NET runtime needed). -->
     <PublishAot>true</PublishAot>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <!-- The RID would make a plain 'dotnet build' self-contained too, scattering the runtime as
+         loose files beside the exe. InstallApp copies only the exe and its own sidecars (matching
+         the shipped single-file AOT publish), so those loose files are left behind and the installed
+         logon-task copy can't find a runtime. Keep a non-publish build framework-dependent - exe +
+         its .dll + configs, all of which InstallApp copies, running on the shared runtime - while
+         publish ('dotnet publish' sets _IsPublishing) stays the self-contained AOT artifact. -->
+    <SelfContained Condition="'$(_IsPublishing)' != 'true'">false</SelfContained>
   </PropertyGroup>
 
   <ItemGroup>

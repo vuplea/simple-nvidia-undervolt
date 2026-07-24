@@ -59,6 +59,13 @@ All actions are driven through the exe; assertions read back directly. Coverage,
   the tool's actual contract: the boost settles on the requested cap point (plain and
   reduced-clock caps — the flatten starts one anchor above the cap because the boost pins one 5 mV
   step below the flat), and the `voltage` telemetry reports a real operating point.
+- **Reference curve** — `set-reference-curve` captures the stock curve (resetting an applied tuning
+  for the capture and restoring it exactly), exports a curve file that imports back, and tuning
+  plans from the saved reference — or warns and falls back to the live curve when the reference
+  doesn't match the card.
+- **Tuning replay** — a tune's `--out-tuning-file` export and `status`'s applied-tuning export
+  carry the same tuned anchors, and `--in-tuning-file` re-applies the exported deltas and memory
+  offset exactly onto a cleared card.
 - **Shortcuts** — saving a `.lnk` (default and custom name) that targets the installed Program Files
   copy with the expected baked arguments; a failed dry-run save leaves no link behind; a
   link-launched apply (or one that just saved its link) badges that link's icon on disk and clears

@@ -1,43 +1,39 @@
-using Microsoft.Win32;
-
 namespace SimpleNvidiaUndervolt.E2E;
 
-/// <summary>Backup of the machine-global state <c>save-reference</c> owns: the HKLM key holding the
-/// saved reference curve. It belongs to the user — a reference captured for their card — and these
-/// tests both overwrite and delete it to exercise the reference and live paths deterministically, so
-/// each wraps itself in one of these and calls <see cref="Restore"/> when it finishes.</summary>
+/// <summary>Backup of the machine-global state <c>set-reference-curve</c> owns: the reference curve
+/// file in the install directory. It belongs to the user — a reference captured for their card —
+/// and these tests both overwrite and delete it to exercise the reference and live paths
+/// deterministically, so each wraps itself in one of these and calls <see cref="Restore"/> when it
+/// finishes.</summary>
 internal sealed class ReferenceCurveBackup
 {
-    private readonly (string Name, object Value, RegistryValueKind Kind)[]? _values;
+    private readonly string? _content;
 
-    private ReferenceCurveBackup((string, object, RegistryValueKind)[]? values) => _values = values;
+    private ReferenceCurveBackup(string? content) => _content = content;
 
-    /// <summary>Captures every value under the key, or null when nothing is saved.</summary>
+    /// <summary>Captures the reference file's content, or null when nothing is saved.</summary>
     public static ReferenceCurveBackup Create()
+        => new(File.Exists(ReferenceCurve.FilePath()) ? File.ReadAllText(ReferenceCurve.FilePath()) : null);
+
+    /// <summary>Removes the saved reference, if any. Guarded like <see cref="PersistedTuning.Remove"/>:
+    /// on a host that never installed anything the data directory itself is missing, and a bare
+    /// <see cref="File.Delete(string)"/> would throw instead of doing nothing.</summary>
+    public static void Remove()
     {
-        using RegistryKey? key = Registry.LocalMachine.OpenSubKey(ReferenceCurve.KeyPath);
-        return new(key?.GetValueNames()
-            .Select(name => (name, key.GetValue(name)!, key.GetValueKind(name)))
-            .ToArray());
+        if (File.Exists(ReferenceCurve.FilePath()))
+        {
+            File.Delete(ReferenceCurve.FilePath());
+        }
     }
 
-    public static void Remove()
-        => Registry.LocalMachine.DeleteSubKeyTree(ReferenceCurve.KeyPath, throwOnMissingSubKey: false);
-
-    /// <summary>Puts the original reference back, or leaves no key when there was none — always from a
-    /// clean slate, so a value the test added can't survive under a restored key.</summary>
+    /// <summary>Puts the original reference back, or leaves no file when there was none.</summary>
     public void Restore()
     {
         Remove();
-        if (_values is null)
+        if (_content is not null)
         {
-            return;
-        }
-
-        using RegistryKey key = Registry.LocalMachine.CreateSubKey(ReferenceCurve.KeyPath, writable: true);
-        foreach (var (name, value, kind) in _values)
-        {
-            key.SetValue(name, value, kind);
+            Directory.CreateDirectory(Path.GetDirectoryName(ReferenceCurve.FilePath())!);
+            File.WriteAllText(ReferenceCurve.FilePath(), _content);
         }
     }
 }

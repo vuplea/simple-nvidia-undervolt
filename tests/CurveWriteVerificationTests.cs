@@ -111,7 +111,7 @@ public class CurveWriteVerificationTests
     {
         // No anchor is flattened down, so there is no reliable signal (a raise the driver may clamp).
         var changes = new[] { new GpuTuning.CurveChange(1000, 2500, 2600, 100_000) };
-        var plan = new GpuTuning.CurvePlan(CapMv: 1000, CapMhz: 2600, CapDeltaMhz: 100,
+        var plan = new GpuTuning.CurvePlan(CapMv: 1000, CapMhz: 2600,
             FlatMv: 1020, FlatMhz: 2650, changes, DeltasKhz: Array.Empty<int>());
 
         Assert.Equal(GpuTuning.WriteVerification.Unverifiable,
@@ -130,16 +130,35 @@ public class CurveWriteVerificationTests
     }
 
     [Fact]
-    public void DuplicateMillivoltsInTheReadBack_JudgeTheFirstAnchor()
+    public void DuplicateMillivoltsInTheReadBack_AreNotJudged_TheRestCarryTheVerdict()
     {
-        // Adjacent status anchors can truncate to the same millivolt. The first (lowest voltage) is the
-        // one a plan change at that mV targeted; later duplicates - here appended still at their stock
-        // clock, which keeps the read monotonic - must not overwrite its realized value.
+        // Adjacent status anchors can truncate to the same millivolt, and a read-back can even
+        // repeat anchors - here appended still at their stock clock, which keeps the read
+        // monotonic. An ambiguous millivolt can't be attributed to one anchor, so those changes
+        // are skipped and the landed unique-millivolt reductions still confirm the write.
         var plan = PlainCapPlan(out var stock);
         var effective = TestCurves.Effective(stock, plan.DeltasKhz);
         effective.AddRange(stock.Where(p => p.Mv >= 1100)); // 5 of the 8 reduced anchors, duplicated
 
         Assert.Equal(GpuTuning.WriteVerification.Confirmed, GpuTuning.VerifyWriteReachedCurve(plan, effective));
+    }
+
+    [Fact]
+    public void ChangeOnlyOnADuplicatedMillivoltAnchor_YieldsNoVerdict()
+    {
+        // A single-anchor document tuning the upper member of a same-millivolt pair: matching by
+        // voltage would read the untouched lower member's clock and convict a landed write -
+        // reverting a good tuning - so an ambiguous anchor yields no judgment at all.
+        var stock = TestCurves.Realistic();
+        stock[13] = (stock[12].Mv, stock[13].Mhz);
+        var changes = new[]
+        {
+            new GpuTuning.CurveChange(stock[13].Mv, stock[13].Mhz, stock[13].Mhz - 20, -20_000),
+        };
+        var effective = stock.Select((p, i) => i == 13 ? (p.Mv, p.Mhz - 20) : p).ToList();
+
+        Assert.Equal(GpuTuning.WriteVerification.Unverifiable,
+            GpuTuning.VerifyWriteReachedCurve(changes, effective, stock));
     }
 
     /// <summary>A curve a bin below another — the shape the live card takes when it is warmer than

@@ -1,54 +1,25 @@
-using System.Globalization;
-using Microsoft.Win32;
-
 namespace SimpleNvidiaUndervolt;
-
-/// <summary>What identifies the GPU a reference curve belongs to: the full name plus the PCI
-/// identifiers pin the exact card model, and the board serial (when the driver reports one) pins the
-/// physical unit — the stock V/F curve comes from per-chip factory binning, so another unit of the
-/// same model has a different curve.</summary>
-internal sealed record GpuIdentity(string Name, string PciIds, string? BoardSerial)
-{
-    public static GpuIdentity Read(IntPtr gpu)
-    {
-        var (device, subSystem, revision, extDevice) = NvApi.GetPciIdentifiers(gpu);
-        return new(
-            NvApi.SafeFullName(gpu),
-            $"{device:X8}-{subSystem:X8}-{revision:X8}-{extDevice:X8}",
-            NvApi.TryGetBoardSerial(gpu));
-    }
-
-    /// <summary>Whether both identities describe the same card — the model and PCI identifiers, plus
-    /// the board serial, which must agree exactly: a serial on one side and none on the other is not
-    /// a match. The stock curve is per-chip, so accepting that pairing would plan another unit's
-    /// binning onto this one, and nothing downstream would catch it (the post-write check verifies
-    /// that the write landed, not that the curve was the right one). Being strict costs nothing when
-    /// it is wrong — the run falls back to a live read, which is what it would do with no reference
-    /// saved at all — so the only card the serial can't discriminate is one whose driver reports no
-    /// serial on either side.</summary>
-    public bool Matches(GpuIdentity other)
-        => Name == other.Name && PciIds == other.PciIds && BoardSerial == other.BoardSerial;
-}
 
 /// <summary>
 /// The saved stock V/F reference curve tuning plans from, so the same command always produces the
 /// same tuning: the live curve shifts slightly with temperature (and boost state), so planning from
 /// a fresh read bakes the capture conditions into the result, while planning from a saved reference
-/// is reproducible. Stored in HKLM — machine-wide like the tuning itself, and admin-only writable so
-/// the elevated logon re-apply never consumes user-writable data — keyed by <see cref="GpuIdentity"/>
-/// and cross-checked against the live curve's anchor voltages (which are static per card) so a
-/// hardware or driver change is noticed instead of silently planning from a stale curve.
+/// is reproducible. Stored as a <see cref="ReferenceCurveDoc"/> JSON file in the install
+/// directory's data subfolder — the same document <c>set-reference-curve</c> exports and imports,
+/// machine-wide like the tuning itself, and admin-only writable (Program Files) so nothing elevated
+/// ever consumes user-writable data — keyed by <see cref="GpuIdentity"/> and cross-checked against
+/// the live curve's anchor voltages (which are static per card) so a hardware or driver change is
+/// noticed instead of silently planning from a stale curve.
 /// </summary>
 internal static class ReferenceCurve
 {
-    /// <summary>The HKLM key holding the reference. Internal so the e2e suite can back up and restore
-    /// the machine's own reference around tests that overwrite it.</summary>
-    internal const string KeyPath = @"SOFTWARE\" + Product.Name + @"\ReferenceCurve";
+    public static string FilePath() => Path.Combine(Persistence.DataDir(), "reference-curve.json");
 
-    /// <summary>A loaded reference: the identity it was captured from, the stock curve, and the
-    /// capture conditions (for display, so a stale-looking result can be traced to its capture).</summary>
-    internal sealed record Saved(GpuIdentity Gpu, IReadOnlyList<(int Mv, int Mhz)> Curve,
-        string SavedAt, int? TempC);
+    /// <summary>A loaded reference: the identity it was captured from (a hand-built import may name
+    /// little or none of it), the stock curve, and the capture conditions (for display, so a
+    /// stale-looking result can be traced to its capture).</summary>
+    internal sealed record Saved(string? GpuName, string? GpuPciIds,
+        IReadOnlyList<(int Mv, int Mhz)> Curve, string? SavedAt, int? TempC);
 
     /// <summary>The outcome of <see cref="Match"/>: the curve to plan from when the reference is
     /// usable (with a note saying so), or null with the tip/warning to print instead.</summary>
@@ -63,10 +34,10 @@ internal static class ReferenceCurve
         return state switch
         {
             State.Usable => new(saved!.Curve, $"Planning from the reference curve ({Describe(saved)})."),
-            State.None => new(null, "Tip: run 'save-reference' once (GPU idle and cool) to make "
+            State.None => new(null, "Tip: run 'set-reference-curve' once (GPU idle and cool) to make "
                                     + "tuning reproducible across temperatures."),
             _ => new(null, $"Warning: {Complaint(state)} - using live curve read; "
-                           + "re-run 'save-reference'."),
+                           + "re-run 'set-reference-curve'."),
         };
     }
 
@@ -76,9 +47,9 @@ internal static class ReferenceCurve
         var (state, saved) = Evaluate(gpu);
         return state switch
         {
-            State.None => "none (run 'save-reference' for temperature-reproducible tuning)",
+            State.None => "none (run 'set-reference-curve' for temperature-reproducible tuning)",
             State.Usable => Describe(saved!),
-            _ => $"unusable - {Complaint(state)}; re-run 'save-reference'",
+            _ => $"unusable - {Complaint(state)}; re-run 'set-reference-curve'",
         };
     }
 
@@ -90,8 +61,7 @@ internal static class ReferenceCurve
         /// <summary>Saved data exists but doesn't read back as a valid reference.</summary>
         Unreadable,
 
-        /// <summary>The identity key doesn't match the live GPU — another card, or one whose board
-        /// serial no longer reads the same.</summary>
+        /// <summary>The identity key doesn't match the live GPU — another card.</summary>
         DifferentHardware,
 
         /// <summary>The identity matches but the live curve's anchor voltages moved — a driver or
@@ -122,7 +92,10 @@ internal static class ReferenceCurve
 
         try
         {
-            if (!saved.Gpu.Matches(GpuIdentity.Read(gpu)))
+            // The identity fields the reference names must match; a hand-built import may name
+            // little or none (the import already warned), and the anchor cross-check below guards
+            // it regardless.
+            if (!TuningDocuments.MatchesLive(saved.GpuName, saved.GpuPciIds, GpuIdentity.Read(gpu)))
             {
                 return (State.DifferentHardware, saved);
             }
@@ -150,68 +123,56 @@ internal static class ReferenceCurve
     };
 
     private static string Describe(Saved saved)
-        => $"saved {saved.SavedAt}{(saved.TempC is { } t ? $" at {t} C" : string.Empty)}";
+        => $"{TuningDocuments.DescribeCapture(saved.SavedAt)}{(saved.TempC is { } t ? $" at {t} C" : string.Empty)}";
 
-    /// <summary>Writes the reference, replacing any previous one. Requires administrator (HKLM);
-    /// the environment refusing the write is reported as the anticipated failure it is.
-    /// The curve goes in before the identity that keys it, so a write interrupted between the two
-    /// leaves the previous identity guarding the new curve: on the same card that pairing is still
-    /// correct, and on another one it fails the identity check and falls back to a live read. The
-    /// reverse order would leave the new card's identity vouching for the old card's curve.</summary>
-    public static void Save(GpuIdentity gpu, IReadOnlyList<(int Mv, int Mhz)> curve, int? tempC)
-    {
-        try
-        {
-            using RegistryKey key = Registry.LocalMachine.CreateSubKey(KeyPath, writable: true);
-            key.SetValue("Points", ToPointLines(curve), RegistryValueKind.MultiString);
-            SetOrDelete(key, "TempC", tempC);
-            key.SetValue("SavedAt", DateTime.Now.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture));
-            key.SetValue("AppVersion", Product.Version);
-            key.SetValue("Name", gpu.Name);
-            key.SetValue("PciIds", gpu.PciIds);
-            SetOrDelete(key, "BoardSerial", gpu.BoardSerial);
-        }
-        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException
-                                       or System.Security.SecurityException)
-        {
-            throw new CliError($@"Writing the reference to HKLM\{KeyPath} failed: {ex.Message}");
-        }
-    }
+    /// <summary>Writes the reference document, replacing any previous one. The document is a single
+    /// file, so there is no torn state between the curve and the identity that keys it. Requires
+    /// administrator (the install directory); the environment refusing the write is reported as the
+    /// anticipated failure it is.</summary>
+    public static void Save(ReferenceCurveDoc doc)
+        => TuningDocuments.WriteFile(FilePath(), TuningDocuments.Render(doc), "the reference curve");
 
     /// <summary>The saved reference, or null. <paramref name="present"/> distinguishes nothing saved
-    /// from saved-but-invalid data (partial write, hand-edited values): the parsed curve must also
-    /// pass the same physical checks the tuning itself relies on, so registry nonsense can't reach a
-    /// curve plan.</summary>
+    /// from saved-but-unusable data (a partial write, hand-edited values, another build's format):
+    /// the parsed curve must also pass the same physical checks the tuning itself relies on, so
+    /// file nonsense can't reach a curve plan.</summary>
     private static Saved? TryLoad(out bool present)
     {
-        using RegistryKey? key = Registry.LocalMachine.OpenSubKey(KeyPath);
-        present = key is not null;
-        if (key is null
-            || key.GetValue("Name") is not string name
-            || key.GetValue("PciIds") is not string pciIds
-            || key.GetValue("SavedAt") is not string savedAt
-            || key.GetValue("Points") is not string[] pointLines
-            || TryParsePointLines(pointLines) is not { } curve
-            || !GpuTuning.CurveVoltsPlausible(curve)
-            || !GpuTuning.CurveFreqsReadable(curve))
+        string json;
+        try
+        {
+            present = File.Exists(FilePath());
+            if (!present)
+            {
+                return null;
+            }
+
+            json = File.ReadAllText(FilePath());
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+                                       or System.Security.SecurityException)
+        {
+            present = true; // reached only when the file exists but can't be read
+            return null;
+        }
+
+        ReferenceCurveDoc doc;
+        try
+        {
+            doc = TuningDocuments.ParseReferenceCurveDoc(json, "the saved reference");
+        }
+        catch (CliError)
         {
             return null;
         }
 
-        return new Saved(new GpuIdentity(name, pciIds, key.GetValue("BoardSerial") as string),
-            curve, savedAt, key.GetValue("TempC") as int?);
-    }
+        IReadOnlyList<(int Mv, int Mhz)> curve = TuningDocuments.Points(doc);
+        if (!GpuTuning.CurveFreqsReadable(curve))
+        {
+            return null;
+        }
 
-    private static void SetOrDelete(RegistryKey key, string name, object? value)
-    {
-        if (value is null)
-        {
-            key.DeleteValue(name, throwOnMissingValue: false);
-        }
-        else
-        {
-            key.SetValue(name, value);
-        }
+        return new Saved(doc.GpuName, doc.GpuPciIds, curve, doc.SavedAt, doc.TempC);
     }
 
     /// <summary>Whether the reference still describes the live curve's table: same anchor count and
@@ -235,29 +196,5 @@ internal static class ReferenceCurve
         }
 
         return true;
-    }
-
-    // The registry rendering of the curve: one "mv mhz" string per anchor, invariant.
-
-    internal static string[] ToPointLines(IReadOnlyList<(int Mv, int Mhz)> curve)
-        => curve.Select(p => string.Create(CultureInfo.InvariantCulture, $"{p.Mv} {p.Mhz}")).ToArray();
-
-    internal static IReadOnlyList<(int Mv, int Mhz)>? TryParsePointLines(string[] lines)
-    {
-        var curve = new List<(int Mv, int Mhz)>(lines.Length);
-        foreach (string line in lines)
-        {
-            string[] parts = line.Split(' ');
-            if (parts.Length != 2
-                || !int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out int mv)
-                || !int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int mhz))
-            {
-                return null;
-            }
-
-            curve.Add((mv, mhz));
-        }
-
-        return curve;
     }
 }

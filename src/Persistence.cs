@@ -6,9 +6,10 @@ namespace SimpleNvidiaUndervolt;
 /// <summary>Makes an undervolt survive a reboot: copies the app into Program Files — the executable
 /// as-is plus a windowless <c>-nocmd</c> copy (so the logon task and shortcut clicks don't flash a
 /// console, while the as-is copy stays a normal console tool) — and registers a Task Scheduler logon
-/// task that re-runs the <c>-nocmd</c> copy (with <c>--silent</c>, so only a startup failure surfaces,
-/// through its message box). The <c>clear</c> command removes the task; the installed copies stay,
-/// since saved shortcuts target them.</summary>
+/// task that re-runs the <c>-nocmd</c> copy with <c>--apply-persisted</c>, re-applying the tuning
+/// file stored alongside it (<see cref="PersistedTuning"/>), and <c>--silent</c>, so only a startup
+/// failure surfaces, through its message box. The <c>clear</c> command removes the task and the
+/// file; the installed copies stay, since saved shortcuts target them.</summary>
 internal static class Persistence
 {
     public const string TaskName = Product.Name;
@@ -16,17 +17,21 @@ internal static class Persistence
     /// <summary>schtasks rejects a longer <c>/TR</c> value, with an error that doesn't say so.</summary>
     private const int MaxTaskRunLength = 261;
 
-    /// <summary>Registers the logon task that re-applies the undervolt, returning the one-line log
-    /// message. <paramref name="persistedArgs"/> is the resolved undervolt command line (see
-    /// <see cref="TuneRequest.ToPersistedArgs"/>). The caller installs the app first (see
-    /// <see cref="InstallApp"/>); the task targets that copy.</summary>
-    public static string RegisterLogonTask(string[] persistedArgs)
+    /// <summary>The marker the apply-form registration is recognized by in
+    /// <see cref="DescribeStartupTask"/> — the same flag <c>tune</c> parses.</summary>
+    private const string ApplyPersistedFlag = "--apply-persisted";
+
+    /// <summary>Registers the logon task that re-applies the persisted tuning, returning the one-line
+    /// log message. The task's command is constant — what to apply lives in the persisted tuning
+    /// file, not in the command line — so re-tuning re-registers an identical task. The caller stores
+    /// the file and installs the app first (see <see cref="InstallApp"/>); the task targets that copy.</summary>
+    public static string RegisterLogonTask()
     {
         // Run at logon (not at boot): the task then lives in the user's interactive session, so it can
         // reach the GPU and its failure box is actually on screen. /RL HIGHEST runs it elevated,
         // which the driver writes need.
-        string taskRun = BuildTaskRun(InstalledNoCmdExePath(), persistedArgs);
-        RunSchtasks("/Create", "/F", "/TN", TaskName, "/SC", "ONLOGON", "/RL", "HIGHEST", "/TR", taskRun);
+        RunSchtasks("/Create", "/F", "/TN", TaskName, "/SC", "ONLOGON", "/RL", "HIGHEST",
+            "/TR", BuildTaskRun(InstalledNoCmdExePath()));
         return $"Registered logon task '{TaskName}'.";
     }
 
@@ -44,6 +49,12 @@ internal static class Persistence
     /// a real undervolt already has.</summary>
     internal static string InstallDir()
         => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), Product.Name);
+
+    /// <summary>The data subfolder holding the app's own state (the reference curve and the
+    /// persisted tuning) — separate from the binaries so <see cref="InstallApp"/>'s wipe of the
+    /// install directory's files can never touch it. Admin-only writable like everything under the
+    /// install directory, which is what lets the elevated logon re-apply consume it.</summary>
+    internal static string DataDir() => Path.Combine(InstallDir(), "data");
 
     private const string NoCmdSuffix = "-nocmd";
 
@@ -92,8 +103,9 @@ internal static class Persistence
         }
     }
 
-    /// <summary>Installs the app into Program Files: empties the install directory (so nothing from a
-    /// previous install lingers), copies the running app — the executable as-is plus its own sidecar
+    /// <summary>Installs the app into Program Files: empties the install directory's files (so nothing
+    /// from a previous install lingers; the data subfolder stays), copies the running app — the
+    /// executable as-is plus its own sidecar
     /// files — and adds a <c>-nocmd</c> copy of the executable made windowless (see
     /// <see cref="PeSubsystem"/>); shortcuts and the logon task target that copy. Returns whether it
     /// installed: the whole step is skipped when the installed executable exists, the <c>-nocmd</c>
@@ -121,6 +133,9 @@ internal static class Persistence
 
             if (Directory.Exists(targetDir))
             {
+                // Top-level files only: the data subfolder (see DataDir) survives a reinstall - the
+                // logon task applies the persisted tuning and tuning plans from the reference curve,
+                // so installing a new build must not silently disarm either.
                 foreach (string file in Directory.GetFiles(targetDir))
                 {
                     File.Delete(file);
@@ -222,16 +237,17 @@ internal static class Persistence
                    || fileName.EndsWith(".pdb", StringComparison.OrdinalIgnoreCase));
     }
 
-    /// <summary>The logon task's full command line: the quoted installed exe, the resolved undervolt and
-    /// the <see cref="StartupFixedArgs"/>. Validated against <see cref="MaxTaskRunLength"/> here, since
-    /// schtasks' own error doesn't name the limit.</summary>
-    internal static string BuildTaskRun(string targetExe, string[] persistedArgs)
+    /// <summary>The logon task's full command line: the quoted installed exe, the apply flag and the
+    /// <see cref="StartupFixedArgs"/>. Only the exe path varies, so the length guard is an invariant
+    /// check against an install path deep enough to overrun schtasks' <c>/TR</c> limit — validated
+    /// here because schtasks' own error doesn't name it.</summary>
+    internal static string BuildTaskRun(string targetExe)
     {
-        string taskRun = CommandLine.Join(persistedArgs.Concat(StartupFixedArgs).Prepend(targetExe));
+        string taskRun = CommandLine.Join(StartupFixedArgs.Prepend(ApplyPersistedFlag).Prepend(targetExe));
         if (taskRun.Length > MaxTaskRunLength)
         {
             throw new CliError($"The logon task's command line is {taskRun.Length} characters; "
-                                + $"schtasks allows at most {MaxTaskRunLength}. Shorten the arguments.");
+                                + $"schtasks allows at most {MaxTaskRunLength}.");
         }
 
         return taskRun;
@@ -252,7 +268,7 @@ internal static class Persistence
             if (exitCode == 0)
             {
                 return ParseTaskArguments(xml) is { } arguments
-                    ? arguments
+                    ? DescribeTaskCommand(arguments)
                     : $"yes (task '{TaskName}'), but its command couldn't be read from the registration.";
             }
 
@@ -271,6 +287,15 @@ internal static class Persistence
             return $"unknown - couldn't query Task Scheduler ({ErrorReporter.Describe(ex)}).";
         }
     }
+
+    /// <summary>The status rendering of the registered task's command. The apply-persisted form is
+    /// the one this build registers — its arguments name no tuning, so the stored file's description
+    /// stands in; any other registration (a hand-edited task, another tool's under our name) is
+    /// framed and shown as its raw arguments.</summary>
+    private static string DescribeTaskCommand(string arguments)
+        => arguments.Contains(ApplyPersistedFlag)
+            ? $"yes - applies the persisted tuning ({PersistedTuning.DescribeForStatus()})."
+            : $"yes (task '{TaskName}') - runs: {arguments}";
 
     /// <summary>The &lt;Arguments&gt; of the task's exec action from schtasks' XML export, or null when
     /// the XML holds none (a hand-edited or foreign registration).</summary>

@@ -62,6 +62,24 @@ internal sealed class TuneRequest
     /// cap's frequency offset — a wider band keeps the clock if the boost settles below the cap.</summary>
     public int CapPoints { get; private init; }
 
+    /// <summary>An exported tuning file to re-apply exactly (<c>--in-tuning-file</c>, absolute).
+    /// The file is the whole tuning, so it excludes every other tuning option.</summary>
+    public string? InTuningFile { get; private init; }
+
+    /// <summary>A file to export the run's tuning document to (<c>--out-tuning-file</c>, absolute):
+    /// the tuned anchors keyed by their stock-curve voltage, plus the memory offset — or, on a
+    /// replay, the document being re-applied. Works on a dry run too, where the file is the
+    /// deliverable.</summary>
+    public string? OutTuningFile { get; private init; }
+
+    /// <summary>Apply the persisted tuning file (<c>--apply-persisted</c>) — the form the logon
+    /// task re-applies the tuning in (see <see cref="PersistedTuning"/>). Not meant for typing,
+    /// but not rejected either.</summary>
+    public bool ApplyPersisted { get; private init; }
+
+    /// <summary>Whether the run re-applies a stored tuning document instead of planning one.</summary>
+    public bool IsReplay => InTuningFile is not null || ApplyPersisted;
+
     /// <summary>Install the app and register a logon task that re-applies this undervolt at startup.
     /// On by default for a real run; <c>--no-persist</c> turns it off.</summary>
     public bool Persist { get; private init; }
@@ -87,12 +105,12 @@ internal sealed class TuneRequest
     public const int DefaultCapPoints = 25;
 
     private static readonly Args.Options Options = Args.Global
-        .WithBare("--no-elevate", "--no-persist", "--dry-run")
+        .WithBare("--no-elevate", "--no-persist", "--dry-run", "--apply-persisted")
         .WithValue(
             "--mv", "--mv-offset", "--mv-pct",
             "--mhz", "--mhz-offset", "--mhz-pct",
             "--mem", "--mem-offset", "--mem-pct",
-            "--peak-mv", "--cap-points")
+            "--peak-mv", "--cap-points", "--in-tuning-file", "--out-tuning-file")
         .WithOptionalValue("--save-shortcut");
 
     public static TuneRequest Parse(string[] args)
@@ -106,6 +124,9 @@ internal sealed class TuneRequest
             Mem = Spec(parsed, "--mem"),
             PeakMv = parsed.Number("--peak-mv"),
             CapPoints = parsed.Integer("--cap-points") ?? DefaultCapPoints,
+            InTuningFile = parsed.FilePath("--in-tuning-file"),
+            OutTuningFile = parsed.FilePath("--out-tuning-file"),
+            ApplyPersisted = parsed.Has("--apply-persisted"),
             Persist = !parsed.Has("--no-persist"),
             SaveShortcut = parsed.Has("--save-shortcut"),
             ShortcutNameOverride = parsed.Value("--save-shortcut"),
@@ -113,6 +134,33 @@ internal sealed class TuneRequest
             NoElevate = parsed.Has("--no-elevate"),
             Silent = parsed.Has("--silent"),
         };
+
+        // A replay re-applies a stored tuning exactly - the document is the whole tuning, so any
+        // option that would steer it is a contradiction, not an input.
+        if (request.IsReplay)
+        {
+            if (request.InTuningFile is not null && request.ApplyPersisted)
+            {
+                throw new CliError("--in-tuning-file and --apply-persisted both name a tuning to "
+                                   + "re-apply - use one.");
+            }
+
+            string replayFlag = request.InTuningFile is not null ? "--in-tuning-file" : "--apply-persisted";
+            if (request.Mv.IsSet || request.Mhz.IsSet || request.Mem.IsSet || request.PeakMv is not null
+                || parsed.Has("--cap-points"))
+            {
+                throw new CliError($"{replayFlag} re-applies the exported tuning exactly - "
+                                   + "drop the other tuning options.");
+            }
+
+            if (request.SaveShortcut)
+            {
+                throw new CliError($"--save-shortcut re-runs a tune command, which {replayFlag} "
+                                   + "isn't - remove it.");
+            }
+
+            return request;
+        }
 
         if (!request.Mv.IsSet && !request.Mem.IsSet)
         {
@@ -174,13 +222,29 @@ internal sealed class TuneRequest
     public (int TargetMhz, int DeltaKhz) ResolveMemory(int baseMemMhz)
     {
         int targetMhz = (int)Math.Round(Mem.Resolve(baseMemMhz));
+        RequirePlausibleMemoryClock(targetMhz, baseMemMhz);
+        return (targetMhz, (targetMhz - baseMemMhz) * 1000);
+    }
+
+    /// <summary>The plausible core-clock range (MHz) every resolved clock is held to — a planned
+    /// run's target and a replayed document's per-anchor resolution
+    /// (<see cref="TuningDocuments.ResolveCurveOffsetsKhz"/>) alike, so a replay can't write a
+    /// clock no plan could have produced.</summary>
+    internal const int MinPlausibleCoreClockMhz = 200;
+
+    internal const int MaxPlausibleCoreClockMhz = 4000;
+
+    /// <summary>The plausibility bound every memory clock passes before a write — a request's
+    /// resolved target and a replayed document's offset alike, so a replay can't apply a memory
+    /// clock no plan could have produced. Takes a long so a hand-edited offset near int's range
+    /// can't wrap into plausibility before it is judged.</summary>
+    internal static void RequirePlausibleMemoryClock(long targetMhz, int baseMemMhz)
+    {
         if (targetMhz < baseMemMhz * 3 / 4 || targetMhz > baseMemMhz * 5 / 4)
         {
             throw new CliError($"Resolved memory clock {targetMhz} MHz is implausible "
                                 + $"(more than 25% from the {baseMemMhz} MHz base).");
         }
-
-        return (targetMhz, (targetMhz - baseMemMhz) * 1000);
     }
 
     /// <summary>Resolves the request against the stock curve into an absolute cap voltage and an
@@ -229,57 +293,19 @@ internal sealed class TuneRequest
         int? targetMhz = Mhz.IsSet ? (int)Math.Round(Mhz.Resolve(peakMhz)) : null;
 
         // Range-check the resolved clock like the voltage/memory targets above.
-        if (targetMhz is { } tMhz && tMhz is < 200 or > 4000)
+        if (targetMhz is { } tMhz && tMhz is < MinPlausibleCoreClockMhz or > MaxPlausibleCoreClockMhz)
         {
-            throw new CliError(
-                $"Resolved core clock {tMhz} MHz is outside the plausible 200-4000 MHz range.");
+            throw new CliError($"Resolved core clock {tMhz} MHz is outside the plausible "
+                + $"{MinPlausibleCoreClockMhz}-{MaxPlausibleCoreClockMhz} MHz range.");
         }
 
         return (targetMv, targetMhz);
     }
 
-    /// <summary>The resolved command line to persist for the logon re-apply. The cap voltage and
-    /// memory clock persist as the absolute values actually applied — both reference static
-    /// quantities (the curve's anchor voltages, the factory base memory clock). The clock persists
-    /// <em>cap-relative</em>: <c>--mhz-offset</c> with <c>--peak-mv</c> set to the cap anchor
-    /// itself. The driver's reported curve shifts with temperature, so re-resolving that offset
-    /// against the logon-time read re-applies the exact frequency offset that was validated; a
-    /// baked absolute clock would drift from it by the thermal shift between the original read and
-    /// the boot-time read. Every user-typed offset/percentage and peak flag collapses into this
-    /// canonical form (<paramref name="capMv"/> is null on a memory-only run,
-    /// <paramref name="capDeltaMhz"/> also when no clock was requested); <c>--cap-points</c> rides
-    /// along only when non-default. No command word: a leading option implies <c>tune</c>, so the
-    /// generated line is exactly what a user would type.</summary>
-    public string[] ToPersistedArgs(int? capMv, int? capDeltaMhz, int? memMhz)
-    {
-        var args = new List<string>();
-        if (capMv is { } mv)
-        {
-            args.Add("--mv");
-            args.Add(Invariant(mv));
-
-            if (capDeltaMhz is { } d)
-            {
-                args.Add("--mhz-offset");
-                args.Add(Invariant(d));
-                args.Add("--peak-mv");
-                args.Add(Invariant(mv));
-            }
-        }
-
-        if (memMhz is { } m)
-        {
-            args.Add("--mem");
-            args.Add(Invariant(m));
-        }
-
-        AddCapPoints(args);
-        return args.ToArray();
-    }
-
     /// <summary>The command line a saved shortcut re-runs: this request's own settings re-emitted (the
     /// relative forms and peak reference intact — the link reproduces the command, not one resolution
-    /// of it), minus the flags that must not ride along (<c>--dry-run</c>, <c>--save-shortcut</c>, and
+    /// of it), minus the flags that must not ride along (<c>--dry-run</c>; <c>--save-shortcut</c>;
+    /// <c>--out-tuning-file</c>, which would re-export to the same baked path on every click; and
     /// <c>--no-elevate</c> — a double-click must elevate, or every click fails against the driver).
     /// A click shows its result in a message box automatically (the <c>-nocmd</c> copy has no
     /// console), so no output flag is baked; <c>--silent</c> rides along when this run had it. The

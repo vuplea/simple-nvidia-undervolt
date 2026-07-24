@@ -92,6 +92,27 @@ internal static class Args
             return value;
         }
 
+        /// <summary>The flag's value as an absolute file path, or null when the flag is absent.
+        /// Resolved against the current directory here, at parse time (which the elevation relay
+        /// preserves), so every later use and error message names one unambiguous file.</summary>
+        public string? FilePath(string flag)
+        {
+            if (Value(flag) is not { } raw)
+            {
+                return null;
+            }
+
+            try
+            {
+                return System.IO.Path.GetFullPath(raw);
+            }
+            catch (Exception ex) when (ex is ArgumentException or PathTooLongException
+                                           or NotSupportedException or IOException)
+            {
+                throw new CliError($"{flag}: '{raw}' isn't a usable path ({ex.Message}).");
+            }
+        }
+
         /// <summary>Like <see cref="Number"/>, but for a count: a fraction is rejected rather than
         /// rounded, so "--cap-points 2.7" fails instead of silently applying a band the user didn't
         /// ask for.</summary>

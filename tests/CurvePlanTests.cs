@@ -12,7 +12,6 @@ public class CurvePlanTests
 
         Assert.Equal(1000, plan.CapMv);
         Assert.Equal(2500, plan.CapMhz);           // the stock clock at the cap
-        Assert.Equal(0, plan.CapDeltaMhz);         // no offset written at the cap
         Assert.Equal(1020, plan.FlatMv);           // the flatten starts one anchor above the cap...
         Assert.Equal(2550, plan.FlatMhz);          // ...at that anchor's own stock clock
 
@@ -33,7 +32,7 @@ public class CurvePlanTests
 
         Assert.Equal(1000, plan.CapMv);
         Assert.Equal(2600, plan.CapMhz);
-        Assert.Equal(100, plan.CapDeltaMhz);       // the offset written at the cap anchor
+        Assert.Equal(100_000, plan.DeltasKhz[10]); // the offset written at the cap anchor
         Assert.Equal(2650, plan.FlatMhz);          // the flat = the stock clock above the cap, +100
 
         // d = 2600 - 2500 = 100. The band is the cap (10) plus the 7 below it (3..9), and the flat
@@ -234,8 +233,7 @@ public class CurvePlanTests
 
         Assert.Equal(800, plan.CapMv);
         Assert.Equal(2000, plan.CapMhz);
-        Assert.Equal(0, plan.CapDeltaMhz);         // nothing was written at the unwritable anchor 0
-        Assert.Equal(0, plan.DeltasKhz[0]);
+        Assert.Equal(0, plan.DeltasKhz[0]);        // nothing was written at the unwritable anchor 0
     }
 
     [Fact]
