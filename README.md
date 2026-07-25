@@ -78,10 +78,6 @@ Memory clock (optional):
 Other:
   --cap-points <n>  Curve anchors holding the cap's offset, counting down from the cap.
                     1 = only the cap point.
-  --in-tuning-file <f>
-                    Re-apply an exported tuning file exactly (excludes the other tuning options).
-  --out-tuning-file <f>
-                    Also export the run's tuning as JSON; with --dry-run, export without applying.
   --no-persist      Don't persist; by default a real run re-applies at logon.
   --save-shortcut [name]
                     Drop a .lnk (specify name/path, otherwise auto-generated).
@@ -96,46 +92,18 @@ By default, tuning resolves against the live curve, which shifts slightly with t
 same command applied hot vs. cold bakes in a slightly different tuning. `set-reference-curve` fixes
 that: run it once with the GPU idle and cool to save the stock V/F curve. Tuning then plans from the
 saved curve instead of a live read, so the same command always produces the same result — this
-enables tuning during load. The reference is stored as `data\reference-curve.json` in the install
-directory (the same document `--out-curve-file` exports).
+enables tuning during load.
 
 ### Exporting and importing curve data
 
-The curve data travels as JSON files, so you can plot it, archive it, or move it between installs:
-
-```powershell
-# Save the reference and also export it:
-simple-nvidia-undervolt set-reference-curve --out-curve-file stock.json
-# Restore that reference later (validated against the card - same GPU, same curve anchors):
-simple-nvidia-undervolt set-reference-curve --in-curve-file stock.json
-# Tune and also export the resulting tuning:
-simple-nvidia-undervolt --mv 900 --out-tuning-file tuning.json
-# Export whatever tuning is currently applied (works for a foreign one, e.g. Afterburner's):
-simple-nvidia-undervolt status --out-tuning-file tuning.json
-# Re-apply an exported tuning exactly, offsets as data - no planning:
-simple-nvidia-undervolt --in-tuning-file tuning.json
-```
-
-Both files hold a `curve` of `{mv, ...}` anchors — the stock table (`{mv, mhz}`) in a reference
-curve, the tuned range of anchors in a tuning, whose `offset` (MHz from stock) is what a re-apply writes and
-`mhz` (the clock at the moment of tuning) is informative — plus `memoryOffset` (MHz) in a tuning.
-Anchors are matched to the card's table by voltage, and the identity fields (`gpuName`,
-`gpuPciIds`) are checked against the live card. Only `curve` is required: in a hand-written
-document every other field may be omitted — an unnamed identity just warns, and an anchor without
-`offset` resolves it from its `mhz` against the reference curve (or a live stock read). Anything
-only a foreign tool sets — a voltage boost, say — is outside the format, so it is neither exported
-nor re-applied.
+The reference curve and applied tunings can travel as JSON files — plot them, archive them, or
+move them between installs. The commands and the file format: [CURVE-FILES.md](CURVE-FILES.md).
 
 ### Persisting at startup
 
-A tuning run **persists by default**: it copies the app to Program Files, stores the resolved
-tuning as `data\persisted-tuning.json` in the install directory (the same document
-`--out-tuning-file` exports — admin-only writable there, since the elevated logon task must not
-consume user-writable data), and registers a Task Scheduler task that re-applies it at logon
-(`tune --apply-persisted`). The offsets re-apply exactly as validated — they are
-temperature-independent, so nothing is re-planned from a boot-time curve read. If the re-apply ever
-fails you get a message box so you are aware. Pass `--no-persist` to skip persistence; `clear`
-removes the file along with the task.
+A tuning run **persists by default**: it copies the app to Program Files, and registers a Task Scheduler
+task that re-applies the same undervolt at logon, elevated. If apply ever fails you get a message box
+so you are aware. Pass `--no-persist` to skip persistence.
 
 ### Saving a shortcut
 
@@ -164,10 +132,10 @@ saved shortcuts keep working.
 
 The app writes GPU tuning via `ClkVfPointsSetControl`, and the memory clock offset via
 `SetPstates20`. The worst case is believed to be an unstable configuration causing application,
-driver, or system crashes. It never raises voltage or power limits: the direct voltage knobs — the
-core voltage-boost percentage and the pstate voltage-offset field, separate APIs from the V/F curve
-— are only ever written as zero, and power-limit APIs are not used. The tuning itself does not
-survive a reboot, but by default it is re-applied at logon — run `clear` to revert to stock.
+driver, or system crashes. It never raises voltage or power limits: the voltage-boost and
+voltage-offset fields are only written as zero, and power-limit APIs are not used. The tuning
+itself does not survive a reboot, but by default it is re-applied at logon — run `clear` to revert
+to stock.
 
 Importantly, this is still an experimental tool and you use it entirely at your own risk — we are not
 responsible for any consequences of using it, whether to hardware or software.
