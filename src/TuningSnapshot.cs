@@ -11,10 +11,10 @@ internal sealed class TuningSnapshot
     public required string Name { get; init; }
     public Reading<int[]> CoreCurveOffsetsKhz { get; init; }
 
-    /// <summary>The effective curve's cap point — where the boost settles under load, see
-    /// <see cref="GpuTuning.EffectiveCapPoint"/> — or null when the frequency column didn't read
+    /// <summary>The effective curve's operating point — where the boost settles under load, see
+    /// <see cref="GpuTuning.EffectiveOperatingPoint"/> — or null when the frequency column didn't read
     /// cleanly. Rendered only when curve offsets are applied: at stock the curve's top is not a cap.</summary>
-    public (int Mv, int Mhz)? EffectiveCap { get; init; }
+    public (int Mv, int Mhz)? OperatingPoint { get; init; }
 
     public Reading<int> MemoryClockKhz { get; init; }
     public Reading<int> BaseMemoryClockKhz { get; init; }
@@ -24,19 +24,19 @@ internal sealed class TuningSnapshot
     {
         Name = NvApi.SafeFullName(gpu),
         CoreCurveOffsetsKhz = Reading.Try(() => GpuTuning.CurveDeltasKhz(gpu).Where(d => d != 0).ToArray()),
-        EffectiveCap = ReadCapPoint(gpu),
+        OperatingPoint = ReadOperatingPoint(gpu),
         MemoryClockKhz = Reading.Try(() => ReadMemoryClockKhz(NvApi.GetPstates20(gpu))),
         BaseMemoryClockKhz = Reading.Try(() => (int)NvApi.GetClockFrequencyKhz(gpu, NvApi.CLOCK_FREQ_TYPE_BASE, NvApi.CLOCK_DOMAIN_MEMORY)),
         CoreVoltageBoostPercent = Reading.Try(() => NvApi.GetCoreVoltageBoostPercent(gpu)),
     };
 
-    /// <summary>Best-effort: the cap is a detail appended to the offsets line, so a failed or unclean
-    /// read renders as no cap rather than as an error of its own.</summary>
-    private static (int Mv, int Mhz)? ReadCapPoint(IntPtr gpu)
+    /// <summary>Best-effort: the operating point is a detail appended to the offsets line, so a
+    /// failed or unclean read renders without it rather than as an error of its own.</summary>
+    private static (int Mv, int Mhz)? ReadOperatingPoint(IntPtr gpu)
     {
         try
         {
-            return GpuTuning.EffectiveCapPoint(NvApi.GetVfCurve(gpu));
+            return GpuTuning.EffectiveOperatingPoint(NvApi.GetVfCurve(gpu));
         }
         catch (Exception)
         {
@@ -65,7 +65,7 @@ internal sealed class TuningSnapshot
         }
 
         string range = DescribeOffsetsRange(offsets);
-        return EffectiveCap is { } cap ? $"{range}, capped at {cap.Mv} mV / {cap.Mhz} MHz" : range;
+        return OperatingPoint is { } p ? $"{range}, operating point {p.Mv} mV / ~{p.Mhz} MHz" : range;
     }
 
     /// <summary>The applied-offsets range as one phrase — shared by the status line and a replay's

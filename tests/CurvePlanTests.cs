@@ -1,53 +1,93 @@
 namespace SimpleNvidiaUndervolt.Tests;
 
 /// <summary>Tests for <see cref="GpuTuning.BuildCurvePlan"/>, the core flatten-and-clamp logic that
-/// turns a voltage cap (and optional clock) into per-anchor frequency deltas.</summary>
+/// turns a voltage cap (and optional clock) into per-anchor frequency deltas. The geometry under
+/// test: the cap→flat-start segment is a straight line through the settle point (one 5 mV boost
+/// step below the flat start) holding the requested clock, spanning a fixed 16 MHz rise. On the
+/// 20 mV-spaced test curve the settle voltage sits 15 mV into the gap, so the cap anchor is
+/// written 12 MHz below the requested clock and the flat top 4 MHz above it.</summary>
 public class CurvePlanTests
 {
     [Fact]
-    public void PlainCap_KeepsTheCapAtStock_AndFlattensFromTheAnchorAbove()
+    public void PlainCap_AimsTheSettlePointAtTheStockClock()
     {
         var stock = TestCurves.Realistic();        // anchor 10 = (1000 mV, 2500 MHz)
         var plan = GpuTuning.BuildCurvePlan(stock, capMv: 1000, targetMhz: null, capPoints: 8);
 
+        Assert.Equal(1015, plan.SettleMv);         // one boost step below the flat start
+        Assert.Equal(2500, plan.SettleMhz);        // the stock clock at the cap, held at the settle
         Assert.Equal(1000, plan.CapMv);
-        Assert.Equal(2500, plan.CapMhz);           // the stock clock at the cap
+        Assert.Equal(2488, plan.CapMhz);           // 12 below: the line through (1015, 2500)
         Assert.Equal(1020, plan.FlatMv);           // the flatten starts one anchor above the cap...
-        Assert.Equal(2550, plan.FlatMhz);          // ...at that anchor's own stock clock
+        Assert.Equal(2504, plan.FlatMhz);          // ...exactly 16 above the cap anchor
 
-        // A plain cap has no offset, so everything through the flat start is at stock; above it the
-        // curve is flattened down to the flat start's stock clock.
-        for (int i = 0; i < stock.Count; i++)
-        {
-            int expectedKhz = i <= 11 ? 0 : (2550 - stock[i].Mhz) * 1000;
-            Assert.Equal(expectedKhz, plan.DeltasKhz[i]);
-        }
-    }
-
-    [Fact]
-    public void ExplicitClock_RaisesTheCapBandAndFlattensAbove()
-    {
-        var stock = TestCurves.Realistic();        // anchor 10 = (1000 mV, 2500 MHz)
-        var plan = GpuTuning.BuildCurvePlan(stock, capMv: 1000, targetMhz: 2600, capPoints: 8);
-
-        Assert.Equal(1000, plan.CapMv);
-        Assert.Equal(2600, plan.CapMhz);
-        Assert.Equal(100_000, plan.DeltasKhz[10]); // the offset written at the cap anchor
-        Assert.Equal(2650, plan.FlatMhz);          // the flat = the stock clock above the cap, +100
-
-        // d = 2600 - 2500 = 100. The band is the cap (10) plus the 7 below it (3..9), and the flat
-        // start (11) carries the same offset; all carry +100. Above the flat start the curve is
-        // flattened down to 2650; below the band it is untouched.
+        // The band (3..10) carries the cap anchor's -12, everything from the flat start up sits on
+        // the 2504 flat top, and below the band the curve is untouched.
         for (int i = 0; i < stock.Count; i++)
         {
             int expectedKhz = i switch
             {
                 < 3 => 0,
-                <= 11 => 100 * 1000,
-                _ => (2650 - stock[i].Mhz) * 1000,
+                <= 10 => -12_000,
+                _ => (2504 - stock[i].Mhz) * 1000,
             };
             Assert.Equal(expectedKhz, plan.DeltasKhz[i]);
         }
+    }
+
+    [Fact]
+    public void ExplicitClock_PlacesTheLineThroughTheSettlePoint()
+    {
+        var stock = TestCurves.Realistic();        // anchor 10 = (1000 mV, 2500 MHz)
+        var plan = GpuTuning.BuildCurvePlan(stock, capMv: 1000, targetMhz: 2600, capPoints: 8);
+
+        Assert.Equal(1015, plan.SettleMv);
+        Assert.Equal(2600, plan.SettleMhz);        // the requested clock, held at the settle point
+        Assert.Equal(2588, plan.CapMhz);
+        Assert.Equal(88_000, plan.DeltasKhz[10]);  // the offset written at the cap anchor
+        Assert.Equal(2604, plan.FlatMhz);
+
+        // d = 2588 - 2500 = +88 carried by the band (3..10); the flat top is 2604 from the flat
+        // start up; below the band the curve is untouched.
+        for (int i = 0; i < stock.Count; i++)
+        {
+            int expectedKhz = i switch
+            {
+                < 3 => 0,
+                <= 10 => 88 * 1000,
+                _ => (2604 - stock[i].Mhz) * 1000,
+            };
+            Assert.Equal(expectedKhz, plan.DeltasKhz[i]);
+        }
+    }
+
+    [Fact]
+    public void FlatStartOneBoostStepAway_PutsTheSettleOnTheCapAnchor()
+    {
+        // 5 mV anchor spacing: the settle voltage IS the cap anchor, so the cap anchor holds the
+        // requested clock outright and the whole 16 MHz rise sits above it.
+        var stock = Enumerable.Range(0, 20).Select(i => (Mv: 800 + i * 5, Mhz: 2000 + i * 50)).ToList();
+        var plan = GpuTuning.BuildCurvePlan(stock, capMv: stock[10].Mv, targetMhz: 2600, capPoints: 8);
+
+        Assert.Equal(stock[10].Mv, plan.SettleMv);
+        Assert.Equal(2600, plan.SettleMhz);
+        Assert.Equal(2600, plan.CapMhz);
+        Assert.Equal(2616, plan.FlatMhz);
+    }
+
+    [Fact]
+    public void TenMillivoltGap_StraddlesTheTarget_HalfTheSpreadEachSide()
+    {
+        // The measured Blackwell shape: a 10 mV gap above the cap puts the settle voltage mid-gap,
+        // so the segment straddles the target - cap anchor 8 below it, flat top 8 above.
+        var stock = TestCurves.Realistic();
+        stock[11] = (stock[10].Mv + 10, stock[11].Mhz);
+        var plan = GpuTuning.BuildCurvePlan(stock, capMv: 1000, targetMhz: 2600, capPoints: 8);
+
+        Assert.Equal(1005, plan.SettleMv);
+        Assert.Equal(2600, plan.SettleMhz);
+        Assert.Equal(2592, plan.CapMhz);
+        Assert.Equal(2608, plan.FlatMhz);
     }
 
     [Theory]
@@ -78,30 +118,30 @@ public class CurvePlanTests
     [Fact]
     public void DipAboveTheCap_DoesNotShaveTheRequestedClock()
     {
-        // The flat's base is floored at the cap's own stock clock, so a curve that dips just above
-        // the cap can't drag the flat under it - which the non-decreasing pass would otherwise take
-        // out of the cap anchor, silently delivering less than was asked for.
+        // The flat sits a fixed rise above the cap anchor rather than on the stock clock above it,
+        // so a curve that dips just above the cap can't drag the flat under the cap - which the
+        // non-decreasing pass would otherwise take out of the cap anchor, silently delivering less
+        // than was asked for.
         var stock = WithFlatSpotAbove(10, dipMhz: 10);
         Assert.True(GpuTuning.CurveFreqsReadable(stock));   // a dip this small still reads clean
 
         var plan = GpuTuning.BuildCurvePlan(stock, capMv: stock[10].Mv, targetMhz: 2600, capPoints: 8);
 
-        Assert.Equal(2600, plan.CapMhz);                    // the requested clock, intact
-        Assert.Equal(2600, plan.FlatMhz);
+        Assert.Equal(2600, plan.SettleMhz);                 // the requested clock, intact
+        Assert.Equal(2604, plan.FlatMhz);
     }
 
     [Fact]
-    public void LevelCurveAboveTheCap_KeepsTheCapClock_WithThePlateauStartingThere()
+    public void LevelCurveAboveTheCap_StillFormsThePlateau_AndHoldsTheStockClock()
     {
-        // Across a level pair there is no higher anchor to start the flat on, so the plateau begins
-        // at the cap itself and the boost settles a step lower. Nothing is shaved: the cap anchor
-        // still holds its stock clock, which is all this can promise there.
+        // Across a level stock pair the fixed rise still separates the flat from the cap anchor, so
+        // the plateau begins above the cap and the settle point keeps the cap's stock clock -
+        // nothing depends on the stock curve rising between the two.
         var stock = WithFlatSpotAbove(10);
         var plan = GpuTuning.BuildCurvePlan(stock, capMv: stock[10].Mv, targetMhz: null, capPoints: 8);
 
-        Assert.Equal(stock[10].Mhz, plan.CapMhz);
-        Assert.Equal(plan.CapMhz, plan.FlatMhz);
-        Assert.Equal(0, plan.DeltasKhz[10]);                // the cap anchor is untouched
+        Assert.Equal(stock[10].Mhz, plan.SettleMhz);
+        Assert.Equal(plan.CapMhz + 16, plan.FlatMhz);
     }
 
     [Fact]
@@ -112,9 +152,10 @@ public class CurvePlanTests
         var stock = TestCurves.Realistic();        // anchor 17 = (1140 mV, 2850 MHz)
         var plan = GpuTuning.BuildCurvePlan(stock, capMv: 1140, targetMhz: null, capPoints: 8);
 
-        Assert.Equal(2850, plan.CapMhz);
-        Assert.Equal(2900, plan.FlatMhz);          // anchor 18's own stock clock
-        Assert.Equal(2900, TestCurves.Apply(stock, plan.DeltasKhz).Max());   // down from 2950
+        Assert.Equal(2850, plan.SettleMhz);
+        Assert.Equal(2838, plan.CapMhz);
+        Assert.Equal(2854, plan.FlatMhz);          // the fixed rise above the cap anchor
+        Assert.Equal(2854, TestCurves.Apply(stock, plan.DeltasKhz).Max());   // down from 2950
     }
 
     [Theory]
@@ -122,10 +163,10 @@ public class CurvePlanTests
     [InlineData(3)]
     [InlineData(8)]
     [InlineData(10)]
-    public void CapBand_SharesTheCapOffset_DownToCapPointsAnchors(int capPoints)
+    public void CapBand_SharesTheCapAnchorsOffset_DownToCapPointsAnchors(int capPoints)
     {
-        var stock = TestCurves.Realistic();        // capMv 1000 -> anchor k = 10, d = 100
-        const int k = 10, d = 100;
+        var stock = TestCurves.Realistic();        // capMv 1000 -> anchor k = 10
+        const int k = 10, d = 88;                  // 2600 requested -> 2588 written at the cap anchor
         var plan = GpuTuning.BuildCurvePlan(stock, capMv: 1000, targetMhz: 2600, capPoints);
 
         int bandStart = k - (capPoints - 1);
@@ -136,7 +177,7 @@ public class CurvePlanTests
 
         for (int i = bandStart; i <= k; i++)
         {
-            Assert.Equal(d * 1000, plan.DeltasKhz[i]);     // band + cap share the cap's offset
+            Assert.Equal(d * 1000, plan.DeltasKhz[i]);     // band + cap share the cap anchor's offset
         }
     }
 
@@ -164,8 +205,9 @@ public class CurvePlanTests
         // The flat top is the plan's flat clock, and nothing rises above it.
         Assert.Equal(plan.FlatMhz, effective.Max());
 
-        // The cap anchor holds the cap clock, and every anchor from the flat start up sits on the
-        // flat top (the cap and the band below stay under it, so the boost settles on the cap).
+        // The cap anchor holds its written clock, every anchor from the flat start up sits on the
+        // flat top, and the settle point is the segment's clock at the settle voltage — the
+        // requested clock, when no floor bit.
         int capIndex = stock.FindIndex(p => p.Mv == plan.CapMv);
         Assert.Equal(plan.CapMhz, effective[capIndex]);
         int flatIndex = stock.FindIndex(p => p.Mv == plan.FlatMv);
@@ -173,28 +215,33 @@ public class CurvePlanTests
         {
             Assert.Equal(plan.FlatMhz, effective[i]);
         }
+
+        Assert.Equal(plan.SettleMhz, GpuTuning.SegmentClockAt(
+            (plan.CapMv, plan.CapMhz), (plan.FlatMv, plan.FlatMhz), plan.SettleMv));
+        if (targetMhz is { } f)
+        {
+            Assert.Equal(f, plan.SettleMhz);
+        }
     }
 
     [Fact]
     public void Changes_ListExactlyTheMovedAnchors()
     {
-        // Anchor i = (800 + 20i mV, 2000 + 50i MHz); cap k = 10 (1000 mV), band 3..9, flat start 11.
-        // Moved anchors: 3..11 carry the cap's +100 offset (the flat start's own stock 2550 + 100 is
-        // the 2650 flat top), 12 (2600 MHz) rises to it, and 14..19 flatten down to it. Anchor 13
-        // already sits at 2650 and 0..2 are below the band - no change.
+        // Anchor i = (800 + 20i mV, 2000 + 50i MHz); cap k = 10 (1000 mV), band 3..10, flat start 11.
+        // Moved anchors: 3..10 carry the cap anchor's +88 (the 2588 the line through the 1015 mV /
+        // 2600 MHz settle point puts there), and 11..19 sit on the 2604 flat top, 16 above it.
         var stock = TestCurves.Realistic();
         var plan = GpuTuning.BuildCurvePlan(stock, capMv: 1000, targetMhz: 2600, capPoints: 8);
 
         var expected = new List<GpuTuning.CurveChange>();
-        for (int i = 3; i <= 11; i++)
+        for (int i = 3; i <= 10; i++)
         {
-            expected.Add(new(stock[i].Mv, stock[i].Mhz, stock[i].Mhz + 100, 100_000));
+            expected.Add(new(stock[i].Mv, stock[i].Mhz, stock[i].Mhz + 88, 88_000));
         }
 
-        expected.Add(new(stock[12].Mv, 2600, 2650, 50_000));
-        for (int i = 14; i <= 19; i++)
+        for (int i = 11; i <= 19; i++)
         {
-            expected.Add(new(stock[i].Mv, stock[i].Mhz, 2650, (2650 - stock[i].Mhz) * 1000));
+            expected.Add(new(stock[i].Mv, stock[i].Mhz, 2604, (2604 - stock[i].Mhz) * 1000));
         }
 
         Assert.Equal(expected, plan.Changes);
@@ -226,13 +273,14 @@ public class CurvePlanTests
     public void CapAtTheLowestAnchor_ReportsTheFlooredClock_NotTheUnwritableTarget()
     {
         // Anchor 0 has no control entry, so with the cap there a below-stock clock can't be realized:
-        // every writable anchor is floored to anchor 0's stock clock, and the reported cap must be
-        // that floor, not the target the plan never wrote anywhere.
+        // every writable anchor is floored to anchor 0's stock clock, and the reported settle clock
+        // must be that floor, not the target the plan never wrote anywhere.
         var stock = TestCurves.Realistic();        // anchor 0 = (800 mV, 2000 MHz)
         var plan = GpuTuning.BuildCurvePlan(stock, capMv: 800, targetMhz: 1900, capPoints: 8);
 
         Assert.Equal(800, plan.CapMv);
         Assert.Equal(2000, plan.CapMhz);
+        Assert.Equal(2000, plan.SettleMhz);
         Assert.Equal(0, plan.DeltasKhz[0]);        // nothing was written at the unwritable anchor 0
     }
 

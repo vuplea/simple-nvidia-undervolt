@@ -34,7 +34,7 @@ internal static class App
     /// and the "offsets don't match / reverted" path was not taken.</summary>
     public static void AssertWriteConfirmed(string output)
     {
-        Assert.Contains("Confirming curve point", output);
+        Assert.Contains("Confirming operating point", output);
         Assert.DoesNotContain("didn't change after writing", output);
     }
 

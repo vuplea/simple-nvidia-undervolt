@@ -289,10 +289,11 @@ internal static class GpuTuning
     /// Writes the undervolt onto the freshly reset card (the caller planned from
     /// <see cref="ResetAndReadStock"/>, whose reset this relies on) in the order the driver requires:
     /// the memory offset first (<see cref="NvApi.SetPstate0Offsets"/> re-derives the perf table and
-    /// wipes curve deltas), then the curve flatten that caps the voltage. The boost algorithm settles
-    /// one voltage step below the flat top, which the plan places so that settle point is the cap
-    /// point (see <see cref="BuildCurvePlan"/>); the band built into <paramref name="plan"/> cushions
-    /// a deeper undershoot. Ends by reading the effective curve back and verifying the write actually
+    /// wipes curve deltas), then the curve flatten that caps the voltage. Under load the boost
+    /// settles one voltage step below the flat top's first anchor; the plan aims the cap→flat
+    /// segment so the clock there is the requested one (see <see cref="BuildCurvePlan"/>), and the
+    /// band built into <paramref name="plan"/> cushions a deeper undershoot. Ends by reading the
+    /// effective curve back and verifying the write actually
     /// landed (see <see cref="ConfirmWrite"/>), reverting to stock and throwing if it didn't. Any step
     /// the driver rejects throws too — so the caller persists and reports "done" only on a real,
     /// verified undervolt.
@@ -382,7 +383,7 @@ internal static class GpuTuning
 
         return ConfirmWrite(gpu, DeriveChanges(baseline, deltasKhz),
             pollForReadable: topMhz >= NvApi.MinBoostClockKhz / 1000, baseline,
-            (verdict, effective) => DescribeReplayResult(effective, verdict));
+            (verdict, effective) => DescribeReplayResult(effective, verdict, baseline, deltasKhz));
     }
 
     /// <summary>The applied deltas a curve anchor can name: anchor 0 is excluded (it has no
@@ -431,11 +432,9 @@ internal static class GpuTuning
     /// <summary>Describes the change <see cref="Apply"/> would make, for <c>--dry-run</c> — writes nothing.</summary>
     public static IReadOnlyList<string> DescribePlan(CurvePlan plan, int? targetMhz)
     {
-        string action = $"cap at {plan.CapMv} mV / {plan.CapMhz} MHz" + (targetMhz is null ? " (stock)" : string.Empty);
-        if (plan.FlatMv != plan.CapMv)
-        {
-            action += $", flat from {plan.FlatMv} mV / {plan.FlatMhz} MHz";
-        }
+        string action = $"pin the boost at {plan.SettleMv} mV / {plan.SettleMhz} MHz"
+            + (targetMhz is null ? " (the stock clock at the cap)" : string.Empty)
+            + $"; cap anchor {plan.CapMv} mV / {plan.CapMhz} MHz, flat from {plan.FlatMv} mV / {plan.FlatMhz} MHz";
 
         var log = new List<string> { $"[dry run] Would {action}; {plan.Changes.Count} point(s) change:" };
         foreach (CurveChange c in plan.Changes)
@@ -456,26 +455,40 @@ internal static class GpuTuning
     internal readonly record struct CurveChange(int Mv, int OldMhz, int NewMhz, int NewDeltaKhz);
 
     /// <summary>The computed curve write: the per-point frequency deltas (kHz, index-aligned with the
-    /// curve), the cap anchor — the point the boost settles on — with its clock, the flat top's start
+    /// curve), the operating point the write pins the boost to
+    /// (<see cref="SettleMv"/>/<see cref="SettleMhz"/> — one boost step below the flat start,
+    /// holding the requested clock), the cap anchor with its written clock, the flat top's start
     /// (<see cref="FlatMv"/>/<see cref="FlatMhz"/>: the anchor above the cap), and a description of
     /// every point that moves.</summary>
-    internal sealed record CurvePlan(int CapMv, int CapMhz, int FlatMv, int FlatMhz,
-        IReadOnlyList<CurveChange> Changes, int[] DeltasKhz);
+    internal sealed record CurvePlan(int SettleMv, int SettleMhz, int CapMv, int CapMhz,
+        int FlatMv, int FlatMhz, IReadOnlyList<CurveChange> Changes, int[] DeltasKhz);
+
+    /// <summary>The boost algorithm's voltage granularity (mV): under load it settles this far below
+    /// the flat top's first anchor, on a curve interpolated finer than the anchor table — measured
+    /// behavior, see DEVELOPMENT.md ("Where the boost settles").</summary>
+    internal const int BoostStepMv = 5;
+
+    /// <summary>The clock spread (MHz) written across the cap→flat-start segment: two clock bins.
+    /// Below this the driver snaps the pair into one plateau whose first anchor is the cap itself,
+    /// dropping the settle a boost step lower (a written 8 MHz rise measurably folds; 16 holds).
+    /// Wider only grows the realized-clock error, which tracks the segment's middle.</summary>
+    private const int FlatSpreadMhz = 16;
 
     /// <summary>
     /// Builds the curve write that caps voltage at <paramref name="capMv"/>, with every delta measured
-    /// from the <paramref name="stock"/> curve. The cap anchor keeps the requested clock F
-    /// (<paramref name="targetMhz"/> if given, else the stock clock at the cap) and the flatten starts
-    /// one anchor <em>above</em> the cap, at that anchor's own stock clock plus the cap's offset — the
-    /// stock slope continued one step. Under load the boost algorithm settles one voltage step (5 mV,
-    /// finer than the anchor spacing where that is 10 mV) below the flat top's lowest anchor, so a
-    /// flatten placed at the cap itself realizes a point one step below the request; placed one anchor
-    /// above, the settle point is the cap point. A cap without two anchors of room above it can't form
-    /// that plateau and is refused. A band of <paramref name="capPoints"/>
-    /// anchors counting down from the cap (the cap itself plus the points below it) carries the cap's own
-    /// frequency offset, so when the boost settles deeper below the cap under load the clock doesn't
-    /// fall off a steep (overclocked) curve back to stock. Everything below the band stays at stock.
-    /// Finally the curve is made non-decreasing (which the driver requires).
+    /// from the <paramref name="stock"/> curve. Under load the boost settles one
+    /// <see cref="BoostStepMv"/> step below the flat top's first anchor, at the clock the effective
+    /// curve holds there — on the cap anchor when the anchor above is one step away, inside the gap
+    /// when the anchors sit further apart. So the cap→flat-start segment is written as a straight
+    /// line through (settle voltage, F) — F being <paramref name="targetMhz"/> if given, else the
+    /// stock clock at the cap — spanning <see cref="FlatSpreadMhz"/>: the smallest rise the driver
+    /// reliably keeps distinct, which also bounds how far the realized clock (mid-segment, within a
+    /// bin) can miss F. A cap without two anchors of room above it can't form the plateau and is
+    /// refused. A band of <paramref name="capPoints"/> anchors counting down from the cap (the cap
+    /// itself plus the points below it) carries the cap anchor's frequency offset, so when the boost
+    /// settles deeper below the cap under load the clock doesn't fall off a steep (overclocked)
+    /// curve back to stock. Everything below the band stays at stock. Finally the curve is made
+    /// non-decreasing (which the driver requires).
     /// </summary>
     internal static CurvePlan BuildCurvePlan(IReadOnlyList<(int Mv, int Mhz)> stock,
         int capMv, int? targetMhz, int capPoints)
@@ -494,10 +507,10 @@ internal static class GpuTuning
         int k = NearestAnchorIndex(stock, capMv);
 
         // The flat top has to span at least two anchors above the cap to be a plateau the boost can
-        // stop under, so the cap needs two anchors of room. With less, the flatten would pull nothing
-        // down - the cap's own anchor keeps its clock by design - and the write would be a silent
-        // no-op reported as a cap. These top anchors sit above every generation's load voltage
-        // anyway, so the request is refused rather than approximated.
+        // stop under, so the cap needs two anchors of room. With less, no plateau forms and nothing
+        // would pin the boost - the write would be a silent no-op reported as a cap. These top
+        // anchors sit above every generation's load voltage anyway, so the request is refused
+        // rather than approximated.
         if (k >= n - 2)
         {
             throw new CliError($"A {stock[k].Mv} mV cap lands within two anchors of the top of this "
@@ -507,28 +520,28 @@ internal static class GpuTuning
                 + "sustained load).");
         }
 
-        // The requested point lives at the cap anchor and the flatten starts one anchor above it (the
-        // summary explains why). The band of `capPoints` anchors ending at the cap carries the cap's
-        // offset — and so does the flat start, whose clock is its own stock value plus that offset.
-        // That stock value is floored at the cap's own: a curve needn't rise between two adjacent
-        // anchors (the driver pins the lowest anchors to a floor clock, and a readable curve may
-        // carry a small dip), and without the floor such a pair would drag the flat below the cap
-        // clock, which the non-decreasing pass below would then take out of the cap itself —
-        // silently shaving the requested clock. Where the stock curve is level across the pair the
-        // flat lands on the cap's own clock, so the plateau begins at the cap and the boost settles
-        // a step lower: the best available there, and those regions are the pinned floor the driver
-        // ignores anyway.
+        // The settle voltage is one boost step below the flat start, floored at the cap anchor (a
+        // gap no wider than the step leaves it on the anchor itself; anchors can also truncate to
+        // the same millivolt, which the guard on the division treats the same way). The cap→flat
+        // segment is the line through (settleMv, f) spanning FlatSpreadMhz, and the band of
+        // `capPoints` anchors ending at the cap carries the cap anchor's offset. The stock curve's
+        // own slope across the pair plays no part: the flat sits a fixed rise above the cap anchor,
+        // so a level or dipping stock pair (the pinned floor clock, a read wobble) can't drag the
+        // flat below the cap and shave the request.
         int f = targetMhz ?? stock[k].Mhz;
-        int capDeltaMhz = f - stock[k].Mhz;
         int flatten = k + 1;
-        int flatBaseMhz = Math.Max(stock[flatten].Mhz, stock[k].Mhz);
+        int settleMv = Math.Max(stock[k].Mv, stock[flatten].Mv - BoostStepMv);
+        int gapMv = stock[flatten].Mv - stock[k].Mv;
+        double intoGap = gapMv == 0 ? 0 : (double)(settleMv - stock[k].Mv) / gapMv;
+        int capAnchorMhz = f - (int)Math.Round(FlatSpreadMhz * intoGap);
+        int capDeltaMhz = capAnchorMhz - stock[k].Mhz;
         int bandStart = Math.Max(0, k - (capPoints - 1));
         var newMhz = new int[n];
         for (int i = 0; i < n; i++)
         {
             if (i >= flatten)
             {
-                newMhz[i] = flatBaseMhz + capDeltaMhz;
+                newMhz[i] = capAnchorMhz + FlatSpreadMhz;
             }
             else if (i >= bandStart)
             {
@@ -541,9 +554,9 @@ internal static class GpuTuning
         }
 
         // Keep the curve non-decreasing (the driver requires it): clamp each point below the flatten
-        // down to its right neighbour - this only bites when the cap's clock lands below stock. The
-        // points at and above the flatten are already constant, so the whole curve is non-decreasing
-        // after this pass.
+        // down to its right neighbour - this only bites at the band's edges when the cap's clock
+        // lands below stock. The points at and above the flatten are already constant, so the whole
+        // curve is non-decreasing after this pass.
         for (int i = flatten - 1; i >= 0; i--)
         {
             newMhz[i] = Math.Min(newMhz[i], newMhz[i + 1]);
@@ -574,7 +587,12 @@ internal static class GpuTuning
             }
         }
 
-        return new CurvePlan(stock[k].Mv, newMhz[k],
+        // The promised operating point, read off the final segment: exactly f by construction,
+        // except when the floors above reshaped the segment (a cap clock at or below the curve's
+        // minimum) - then the report must carry what the write actually holds there.
+        int settleMhz = SegmentClockAt((stock[k].Mv, newMhz[k]), (stock[flatten].Mv, newMhz[flatten]), settleMv);
+
+        return new CurvePlan(settleMv, settleMhz, stock[k].Mv, newMhz[k],
             stock[flatten].Mv, newMhz[flatten], changes, deltasKhz);
     }
 
@@ -724,12 +742,30 @@ internal static class GpuTuning
         return mhz0 + (mv - mv0) / (mv1 - mv0) * (mhz1 - mhz0);
     }
 
+    /// <summary>The clock on the straight segment between two curve points at a voltage between them,
+    /// clamping outside the pair — how the driver's finer-grained curve fills an anchor gap, so also
+    /// how a settle voltage inside one maps to a clock.</summary>
+    internal static int SegmentClockAt((int Mv, int Mhz) a, (int Mv, int Mhz) b, int mv)
+    {
+        if (mv <= a.Mv)
+        {
+            return a.Mhz;
+        }
+
+        if (mv >= b.Mv)
+        {
+            return b.Mhz;
+        }
+
+        return a.Mhz + (int)Math.Round((double)(b.Mhz - a.Mhz) * (mv - a.Mv) / (b.Mv - a.Mv));
+    }
+
     /// <summary>The V/F curve's bin granularity: clock read-backs land on ~15 MHz steps, so a comparison
     /// against an intended clock tolerates this much noise (and a change smaller than it isn't real).</summary>
     private const int CurveBinMhz = 15;
 
-    /// <summary>The no-numbers report both write paths print when the post-apply read-back can't
-    /// be rendered.</summary>
+    /// <summary>The no-numbers report the planned write's confirmation prints when the post-apply
+    /// read-back can't be rendered.</summary>
     private const string UncleanReadBackLine =
         "Curve: the clock read-back wasn't clean (usually a power-state change mid-apply).";
 
@@ -749,7 +785,7 @@ internal static class GpuTuning
         // read straight to the no-verdict path instead of waiting out the full poll window.
         => ConfirmWrite(gpu, plan.Changes,
             pollForReadable: plan.FlatMhz >= NvApi.MinBoostClockKhz / 1000, referenceBaseline,
-            (verdict, effective) => DescribeRealizedCap(effective, plan, targetMhz, verdict,
+            (verdict, effective) => DescribeRealizedOperatingPoint(effective, plan, targetMhz, verdict,
                 planFromReference: referenceBaseline is not null));
 
     /// <summary>The confirmation skeleton the planned and replay writes share: read the effective
@@ -774,21 +810,40 @@ internal static class GpuTuning
         return describe(verdict, effective);
     }
 
-    /// <summary>The replay counterpart of <see cref="DescribeRealizedCap"/>: a document names no
-    /// requested cap or clock target to compare against, so the report is the verdict and the
-    /// effective cap the write produced.</summary>
+    /// <summary>The replay counterpart of <see cref="DescribeRealizedOperatingPoint"/>: a document
+    /// names no requested cap or clock target to compare against, but the written curve
+    /// (<paramref name="baseline"/> plus <paramref name="deltasKhz"/> — this run's own write)
+    /// locates its flat start exactly, so the operating point is read from the effective curve at
+    /// anchors the write names; the tilt-prone shape inference stays <c>status</c>-only. A write
+    /// with no plateau (a document that only raises scattered anchors) pins no operating point,
+    /// and an unreadable or anchor-less read-back can't report one — both report the verdict
+    /// alone.</summary>
     private static IReadOnlyList<string> DescribeReplayResult(
-        IReadOnlyList<(int Mv, int Mhz)> effective, WriteVerification verdict)
+        IReadOnlyList<(int Mv, int Mhz)> effective, WriteVerification verdict,
+        IReadOnlyList<(int Mv, int Mhz)> baseline, int[] deltasKhz)
     {
-        if (EffectiveCapPoint(effective) is not { } cap)
-        {
-            return new[] { UncleanReadBackLine };
-        }
-
         string line = verdict == WriteVerification.Confirmed
             ? "Confirming curve write: the offsets reached the effective curve"
             : "Curve offsets written (no measurable reduction to verify the write against)";
-        return new[] { $"{line}; effective cap {cap.Mv} mV / {cap.Mhz} MHz." };
+
+        var written = new List<(int Mv, int Mhz)>(baseline.Count);
+        for (int i = 0; i < baseline.Count; i++)
+        {
+            written.Add((baseline[i].Mv, baseline[i].Mhz + (int)Math.Round(deltasKhz[i] / 1000.0)));
+        }
+
+        int flatStart = FlatStartIndex(written);
+        if (flatStart == 0 || flatStart == written.Count - 1
+            || !CurveFreqsReadable(effective)
+            || PointAtVoltage(effective, written[flatStart - 1].Mv) is not { } cap
+            || PointAtVoltage(effective, written[flatStart].Mv) is not { } flat)
+        {
+            return new[] { $"{line}." };
+        }
+
+        int settleMv = Math.Max(cap.Mv, flat.Mv - BoostStepMv);
+        string note = FoldNote(written[flatStart].Mhz - written[flatStart - 1].Mhz, flat.Mhz - cap.Mhz);
+        return new[] { $"{line}; operating point {settleMv} mV / ~{SegmentClockAt(cap, flat, settleMv)} MHz{note}." };
     }
 
     /// <summary>The effective read-back a write confirmation judges, or null with the no-verdict
@@ -971,47 +1026,83 @@ internal static class GpuTuning
         return (byMv, ambiguous);
     }
 
-    /// <summary>The curve's effective cap point — where the boost settles under load: the anchor just
-    /// below the flat top (the boost pins one voltage step under the flat start, so that anchor is
-    /// the operating point; a fully flat curve has nothing below and reports its first anchor).
-    /// Inferred from the curve's shape alone, for the <c>status</c> line, which has only a read to go
-    /// on; a run that just wrote the tuning knows which anchor it capped and reports that instead
-    /// (<see cref="RealizedCapPoint"/>). The flat is matched within one bin of the max clock, which
-    /// absorbs the driver snapping one edge of it. A read taken while the card sits far from the
-    /// reference temperature can tilt the whole flat into a staircase of bin-sized plateaus, and
-    /// that walks this estimate up toward the curve's top — a transient a re-read clears, and the
-    /// reason the post-apply line doesn't rely on this. Null when the frequency column isn't a clean
-    /// read, since the numbers would be meaningless.</summary>
-    internal static (int Mv, int Mhz)? EffectiveCapPoint(IReadOnlyList<(int Mv, int Mhz)> effective)
+    /// <summary>The curve's operating point — where the boost settles under load — inferred from the
+    /// effective curve's shape alone: one <see cref="BoostStepMv"/> below the flat top's first
+    /// anchor (floored at the anchor below it), at the clock the segment holds there. The flat top
+    /// is the curve's maximal run of equal top clocks — the driver reports an applied flatten
+    /// exactly level, while the anchor below it sits a distinct rise lower by design
+    /// (<see cref="BuildCurvePlan"/>); a fully flat curve has no anchor below and reports its first
+    /// point. A top of a <em>single</em> anchor is no flatten at all — a stock curve's peak, or one
+    /// bin of read-back noise on the flat's top edge — and inferring a near-peak "operating point"
+    /// from it would fabricate a number, so it reports none. For the <c>status</c> line, which has
+    /// only a read to go on; a run that just wrote the tuning knows its anchors and reports from
+    /// them instead (<see cref="DescribeRealizedOperatingPoint"/>). A read taken while the card
+    /// sits far from the reference temperature can tilt the flat into a staircase of bin-sized
+    /// plateaus, which walks this estimate up toward the curve's top or (fully tilted) suppresses
+    /// it — a transient a re-read clears, and the reason the post-apply lines don't rely on this.
+    /// Null when the frequency column isn't a clean read, since the numbers would be meaningless.</summary>
+    internal static (int Mv, int Mhz)? EffectiveOperatingPoint(IReadOnlyList<(int Mv, int Mhz)> effective)
     {
         if (!CurveFreqsReadable(effective))
         {
             return null;
         }
 
-        int maxMhz = effective.Max(c => c.Mhz);
-        int flatStart = 0;
-        while (effective[flatStart].Mhz < maxMhz - CurveBinMhz)
+        int flatStart = FlatStartIndex(effective);
+        if (flatStart == effective.Count - 1)
         {
-            flatStart++;
+            return null; // a single-anchor top is not a plateau - nothing pins the boost there
         }
 
-        return effective[Math.Max(0, flatStart - 1)];
+        if (flatStart == 0)
+        {
+            return effective[0];
+        }
+
+        (int Mv, int Mhz) below = effective[flatStart - 1];
+        (int Mv, int Mhz) flat = effective[flatStart];
+        int mv = Math.Max(below.Mv, flat.Mv - BoostStepMv);
+        return (mv, SegmentClockAt(below, flat, mv));
     }
 
-    /// <summary>The realized cap point after a write: the anchor the plan capped, carrying the clock
-    /// the read-back shows there. The plan names that anchor outright, so unlike
-    /// <see cref="EffectiveCapPoint"/> this needs no inference from the curve's shape and a tilted
-    /// read (a card far from its reference temperature) can't walk it off the cap. Matched by
-    /// voltage, keeping the first of anchors that truncate to the same millivolt — the one a plan
-    /// change at that millivolt targeted, as in <see cref="ByVoltage"/>. Null when the read-back
-    /// doesn't cover the anchor.</summary>
-    internal static (int Mv, int Mhz)? RealizedCapPoint(
-        IReadOnlyList<(int Mv, int Mhz)> effective, int capMv)
+    /// <summary>The first index of the curve's flat top — the maximal run of anchors equal to the
+    /// last anchor's clock. 0 when the whole curve is level.</summary>
+    private static int FlatStartIndex(IReadOnlyList<(int Mv, int Mhz)> curve)
+    {
+        int flatStart = curve.Count - 1;
+        while (flatStart > 0 && curve[flatStart - 1].Mhz == curve[^1].Mhz)
+        {
+            flatStart--;
+        }
+
+        return flatStart;
+    }
+
+    /// <summary>The warning appended when a written cap→flat rise reads back collapsed: the driver
+    /// snapped the pair into one plateau — the rise landed under a clock bin on this card, whether
+    /// from thermal re-shaping between the planning curve and the live one or a generation with
+    /// coarser bins — which moves the plateau's first anchor down onto the cap and the settle one
+    /// boost step lower. A squeezed-but-intact read-back still shows about a bin of rise while a
+    /// fold reads level, so the threshold sits between the two; a written rise under a bin never
+    /// promised separation, so it is not judged.</summary>
+    private static string FoldNote(int writtenRiseMhz, int readBackRiseMhz)
+        => writtenRiseMhz >= 8 && readBackRiseMhz < 4
+            ? $" - the cap-to-flat rise reads back collapsed, so the boost may settle {BoostStepMv} mV lower"
+            : string.Empty;
+
+    /// <summary>The effective curve's point at an anchor voltage the plan names (the cap anchor, the
+    /// flat start), carrying the clock the read-back shows there. The plan names its anchors
+    /// outright, so unlike <see cref="EffectiveOperatingPoint"/> this needs no inference from the
+    /// curve's shape and a tilted read (a card far from its reference temperature) can't walk it off
+    /// the anchor. Matched by voltage, keeping the first of anchors that truncate to the same
+    /// millivolt — the one a plan change at that millivolt targeted, as in
+    /// <see cref="IndexByVoltage"/>. Null when the read-back doesn't cover the anchor.</summary>
+    internal static (int Mv, int Mhz)? PointAtVoltage(
+        IReadOnlyList<(int Mv, int Mhz)> effective, int mv)
     {
         foreach (var point in effective)
         {
-            if (point.Mv == capMv)
+            if (point.Mv == mv)
             {
                 return point;
             }
@@ -1020,39 +1111,47 @@ internal static class GpuTuning
         return null;
     }
 
-    /// <summary>Reports the realized cap from the effective read-back (see
-    /// <see cref="RealizedCapPoint"/>). Flags an explicit frequency target that wasn't reached —
-    /// measured against the plan's own cap clock, so a target the plan itself floored (a clock below
-    /// the lowest anchor's stock clock) is reported as floored, not blamed on the driver. A plan
-    /// built from the saved reference curve intentionally reads back shifted by the live curve's
-    /// thermal offset from the reference, so its note names that instead of a smoothing failure.</summary>
-    private static IReadOnlyList<string> DescribeRealizedCap(
+    /// <summary>Reports the realized operating point from the effective read-back: the settle
+    /// voltage's clock on the cap→flat segment as the card now holds it (the anchors located by
+    /// <see cref="PointAtVoltage"/>). Flags an explicit frequency target that wasn't reached —
+    /// measured against the plan's own settle clock, so a target the plan itself floored (a clock
+    /// below the lowest anchor's stock clock) is reported as floored, not blamed on the driver. A
+    /// plan built from the saved reference curve intentionally reads back shifted by the live
+    /// curve's thermal offset from the reference, so its note names that instead of a smoothing
+    /// failure.</summary>
+    private static IReadOnlyList<string> DescribeRealizedOperatingPoint(
         IReadOnlyList<(int Mv, int Mhz)> effective, CurvePlan plan, int? targetMhz,
         WriteVerification verdict, bool planFromReference)
     {
         // The verdict on the write is already in (see ConfirmWrite); this reports the realized clock,
         // which lives in the live frequency column. If that column reads collapsed (usually a power-state
         // change mid-apply), the numbers would be meaningless and an explicit target would look "not
-        // reached", so skip the readout rather than print a misleading cap.
-        if (!CurveFreqsReadable(effective) || RealizedCapPoint(effective, plan.CapMv) is not { } cap)
+        // reached", so skip the readout rather than print a misleading point.
+        if (!CurveFreqsReadable(effective)
+            || PointAtVoltage(effective, plan.CapMv) is not { } cap
+            || PointAtVoltage(effective, plan.FlatMv) is not { } flat)
         {
             return new[] { UncleanReadBackLine };
         }
+
+        // The clock carries a ~ because the segment's read-back is one bin-snap away from what the
+        // boost realizes; the voltage is the measured settle law and prints plain.
+        int realizedMhz = SegmentClockAt(cap, flat, plan.SettleMv);
 
         // Only a confirmed verdict may read as one: a plan with nothing measurable to check (a pure
         // overclock, or a cap whose every reduction is sub-bin) reports the realized point without
         // claiming the write was verified against the curve.
         string line = verdict == WriteVerification.Confirmed
-            ? $"Confirming curve point: {cap.Mv} mV / {cap.Mhz} MHz"
-            : $"Curve point: {cap.Mv} mV / {cap.Mhz} MHz (no measurable reduction to verify the "
-              + "write against)";
+            ? $"Confirming operating point: {plan.SettleMv} mV / ~{realizedMhz} MHz"
+            : $"Operating point: {plan.SettleMv} mV / ~{realizedMhz} MHz (no measurable reduction "
+              + "to verify the write against)";
         if (targetMhz is { } f)
         {
-            if (Math.Abs(plan.CapMhz - f) > CurveBinMhz)
+            if (Math.Abs(plan.SettleMhz - f) > CurveBinMhz)
             {
                 line += $" - the requested {f} MHz was floored to the curve's minimum clock";
             }
-            else if (Math.Abs(cap.Mhz - plan.CapMhz) > CurveBinMhz)
+            else if (Math.Abs(realizedMhz - plan.SettleMhz) > CurveBinMhz)
             {
                 line += planFromReference
                     ? $" - off the {f} MHz target at the current temperature (the written offset "
@@ -1061,7 +1160,7 @@ internal static class GpuTuning
             }
         }
 
-        return new[] { line };
+        return new[] { line + FoldNote(plan.FlatMhz - plan.CapMhz, flat.Mhz - cap.Mhz) };
     }
 
     /// <summary>The per-anchor frequency deltas currently applied, index-aligned with the curve.</summary>

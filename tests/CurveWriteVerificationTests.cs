@@ -68,9 +68,9 @@ public class CurveWriteVerificationTests
     }
 
     [Theory]
-    [InlineData(8, nameof(GpuTuning.WriteVerification.Confirmed))]     // every reduction landed
-    [InlineData(4, nameof(GpuTuning.WriteVerification.Confirmed))]     // the exact majority boundary
-    [InlineData(3, nameof(GpuTuning.WriteVerification.Unverifiable))]  // just under it: wobble, no verdict
+    [InlineData(9, nameof(GpuTuning.WriteVerification.Confirmed))]     // every reduction landed
+    [InlineData(5, nameof(GpuTuning.WriteVerification.Confirmed))]     // the exact majority boundary
+    [InlineData(4, nameof(GpuTuning.WriteVerification.Unverifiable))]  // just under it: wobble, no verdict
     [InlineData(0, nameof(GpuTuning.WriteVerification.NotReflected))]  // nothing moved - the layout-mismatch signature
     public void MovedAnchorCount_DecidesTheVerdict(int movedCount, string expectedVerdict)
     {
@@ -78,8 +78,10 @@ public class CurveWriteVerificationTests
         // every anchor at stock); a moved minority must yield no verdict rather than a spurious revert.
         var expected = Enum.Parse<GpuTuning.WriteVerification>(expectedVerdict);
         var plan = PlainCapPlan(out var stock);
-        var reduced = plan.Changes.Where(c => c.NewMhz < c.OldMhz).ToList();
-        Assert.Equal(8, reduced.Count); // capMv 1000 flattens anchors 12..19 down to the flat clock
+        var reduced = plan.Changes.Where(c => c.OldMhz - c.NewMhz >= 15).ToList();
+        // capMv 1000 flattens the flat start and everything above (11..19) down by at least a bin;
+        // the band's small straddle share is sub-bin and never judged.
+        Assert.Equal(9, reduced.Count);
 
         var mhz = stock.Select(p => p.Mhz).ToArray();
         for (int i = 0; i < movedCount; i++)
@@ -111,7 +113,7 @@ public class CurveWriteVerificationTests
     {
         // No anchor is flattened down, so there is no reliable signal (a raise the driver may clamp).
         var changes = new[] { new GpuTuning.CurveChange(1000, 2500, 2600, 100_000) };
-        var plan = new GpuTuning.CurvePlan(CapMv: 1000, CapMhz: 2600,
+        var plan = new GpuTuning.CurvePlan(SettleMv: 1015, SettleMhz: 2638, CapMv: 1000, CapMhz: 2600,
             FlatMv: 1020, FlatMhz: 2650, changes, DeltasKhz: Array.Empty<int>());
 
         Assert.Equal(GpuTuning.WriteVerification.Unverifiable,
@@ -138,7 +140,7 @@ public class CurveWriteVerificationTests
         // are skipped and the landed unique-millivolt reductions still confirm the write.
         var plan = PlainCapPlan(out var stock);
         var effective = TestCurves.Effective(stock, plan.DeltasKhz);
-        effective.AddRange(stock.Where(p => p.Mv >= 1100)); // 5 of the 8 reduced anchors, duplicated
+        effective.AddRange(stock.Where(p => p.Mv >= 1100)); // 5 of the 9 reduced anchors, duplicated
 
         Assert.Equal(GpuTuning.WriteVerification.Confirmed, GpuTuning.VerifyWriteReachedCurve(plan, effective));
     }

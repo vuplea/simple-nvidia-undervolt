@@ -7,9 +7,9 @@ namespace SimpleNvidiaUndervolt.E2E;
 /// Tests that need the GPU working, not idle: a Playwright-driven WebGL load
 /// (<see cref="GpuLoadFixture"/>) holds the boost algorithm at its operating point, and the tests
 /// assert where that point lands against an applied cap. This is the tool's actual contract — the
-/// flatten is placed so the boost settles on the requested cap point (one 5 mV step below the flat
-/// start), and only a loaded card shows where the boost settles — so these are the only tests that
-/// verify the undervolt does what it says, rather than that the curve write landed.
+/// cap→flat segment is aimed so the boost, settling one 5 mV step below the flat start, lands on
+/// the requested clock — and only a loaded card shows where the boost settles, so these are the
+/// only tests that verify the undervolt does what it says, rather than that the curve write landed.
 /// </summary>
 [Collection(GpuCollection.Name)]
 public sealed class LoadTests : IClassFixture<GpuLoadFixture>
@@ -36,10 +36,10 @@ public sealed class LoadTests : IClassFixture<GpuLoadFixture>
         var (settleMv, settleMhz) = SampleSettledPointOrSkip();
         AssertSettledOnTheCap(stock, k, settleMv);
 
-        // ...at the cap point's own clock: at or a hair above the stock clock there (the settle can
-        // sit in a 10 mV anchor gap, interpolating toward the flat start), never up at the flat top
-        // and never fallen down the stock curve below the cap.
-        Assert.InRange(settleMhz, stock[k].Mhz - 25, stock[k + 1].Mhz + 25);
+        // ...at the cap point's own stock clock, wherever in the anchor gap the settle voltage
+        // falls - the straddle holds the requested clock at the settle point, so the tolerance is
+        // read-back bins plus the thermal drift since the stock read, not an anchor step.
+        Assert.InRange(settleMhz, stock[k].Mhz - 25, stock[k].Mhz + 25);
     }
 
     [SkippableFact]
@@ -58,8 +58,9 @@ public sealed class LoadTests : IClassFixture<GpuLoadFixture>
 
         // The requested clock is held at the settle point. The flatten-at-the-cap shape fails this
         // (and the voltage check above): the boost lands one anchor below the cap, a stock-slope
-        // step (~15-25 MHz) under the target.
-        Assert.InRange(settleMhz, targetMhz - 25, targetMhz + (stock[k + 1].Mhz - stock[k].Mhz) + 25);
+        // step under the target. The stock-slope-continued shape fails it too on a wide anchor gap,
+        // overshooting by half the stock step.
+        Assert.InRange(settleMhz, targetMhz - 25, targetMhz + 25);
     }
 
     [SkippableFact]

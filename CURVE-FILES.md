@@ -67,11 +67,11 @@ base clock):
   "memoryOffset": 1400,
   "curve": [
     { "mv": 890, "offset": 480, "mhz": 2820 },
-    { "mv": 895, "offset": 480, "mhz": 2842 },
+    { "mv": 895, "offset": 480, "mhz": 2850 },
     { "mv": 900, "offset": 480, "mhz": 2872 },
-    { "mv": 910, "offset": 457, "mhz": 2872 },
+    { "mv": 910, "offset": 473, "mhz": 2888 },
     … the flattened anchors above the cap …
-    { "mv": 1240, "offset": -323, "mhz": 2872 }
+    { "mv": 1240, "offset": -307, "mhz": 2888 }
   ]
 }
 ```

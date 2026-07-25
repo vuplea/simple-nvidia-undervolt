@@ -88,6 +88,44 @@ the card.
 The core-domain point slots come first (a per-entry type word says which domain a slot belongs to:
 0 = core, 1 = memory), and the memory slots follow — slot 80 on Pascal, slot 127 on a 5090.
 
+## Where the boost settles
+
+A flatten pins the boost by curve shape alone, so the plan is built on how the boost algorithm
+picks its operating point. NVIDIA doesn't document this; the following is measured on an RTX 5090
+under a sustained FurMark load, comparing written curve shapes against `watch` and `curve`
+read-backs:
+
+- **The settle voltage is one 5 mV step below the flat top's first anchor.** A flat from 910 mV
+  runs the card at 905 mV; a flat from 900 mV runs it at 895 mV. It never runs on the flat itself.
+- **The driver's curve is finer than the anchor table.** Table anchors sit 5 or 10 mV apart
+  (Blackwell cycles 5-5-5-10, with the 10 mV gap right after every multiple of 25 mV), but the
+  settle voltage exists at 5 mV granularity regardless: a flat from 910 mV settles at 905 mV,
+  where no anchor exists — the clock there interpolates between the 900 and 910 anchors.
+- **The realized clock tracks the middle of the cap→flat segment, within one bin.** Clocks
+  quantize to ~7.5 MHz bins on Blackwell (~15 MHz read-back steps on older generations). Measured
+  at a 900 mV cap: a segment written 2880→2903 settles at 2887–2895; written 2872→2888 it settles
+  at 2880; written 2880→2896 it settles at 2887. "Mid-segment" and "one bin below the flat" fit
+  every measurement equally — indistinguishable at bin granularity.
+- **The driver re-shapes written anchors by a bin or two.** A pair written 2872/2888 reads back
+  2880/2887 from the status curve, and neighbouring anchors of the same write shift by anything
+  from 0 to +15 MHz. Aiming the shape finer than a bin is therefore meaningless.
+- **A cap→flat rise below ~2 bins folds.** Written 8 MHz apart, the driver snaps the pair into one
+  plateau: the flat's first anchor becomes the cap anchor itself and the settle drops 5 mV lower,
+  landing a stock-slope step below the request. Written 16 MHz apart, the pair stays distinct. On
+  generations whose clocks step ~15 MHz, 16 MHz is a single bin and folding is plausible but
+  unmeasured; a fold degrades to the settle-a-step-lower shape (less clock at less voltage — the
+  safe direction), and the post-apply report flags a cap→flat rise that reads back collapsed.
+
+`GpuTuning.BuildCurvePlan` encodes the consequences: the cap→flat segment is a straight line
+through (settle voltage, requested clock) with a fixed 16 MHz rise — the smallest the driver
+reliably keeps, which also bounds the realized-clock miss at half the rise, inside the bin noise.
+Where the gap above the cap anchor is 5 mV, the settle point *is* the cap anchor and holds the
+request outright; where it is 10 mV, the segment straddles the request 8 MHz each side and the
+card operates 5 mV above the named cap (`--mv 900` runs at 905 mV). The alternative — starting the
+plateau at the cap anchor so the card stays at or under the named voltage — realizes a clock a
+stock-slope step below the request; running one step higher in voltage at the requested clock is
+the safe side of that trade.
+
 ## Generations
 
 **Pascal (GTX 10xx, 2016) is the architectural floor**: GPU Boost 3.0 introduced the per-point V/F

@@ -18,7 +18,7 @@ public sealed class TuningShapeTests
     public TuningShapeTests(GpuFixture gpu) => _gpu = gpu;
 
     [SkippableFact]
-    public void PlainCap_LeavesTheCapAndFlatStartAtStock_AndFlattensOnlyAbove()
+    public void PlainCap_WritesTheStraddle_AndFlattensAbove()
     {
         Skip.IfNot(_gpu.Available, _gpu.SkipReason);
         var (stock, k) = ReadStockAndPickAnchor();
@@ -27,17 +27,23 @@ public sealed class TuningShapeTests
         Assert.Equal(0, exitCode);
         App.AssertWriteConfirmed(output);
 
-        // The shape signature, exact in the written deltas: nothing below or at the flat start
-        // moves (a plain cap keeps stock clocks through it - the boost then settles one step below
-        // the flat start, i.e. on the cap point), and everything above only comes down. A
-        // flatten-at-the-cap shape would show a negative delta at k+1.
+        // The shape signature, exact in the written deltas: the cap anchor and the band below share
+        // one offset at most a spread below stock (the segment is aimed so the settle voltage holds
+        // the stock clock, which writes the cap anchor a little under it), the flat top starts
+        // exactly the fixed 16 MHz spread above the cap anchor, and everything from there up is one
+        // level plateau. A flatten-at-the-cap shape would leave no rise between k and k+1; the
+        // stock-slope-continued shape would show a stock-step rise instead of the fixed spread.
         int[] deltas = ReadDeltasAlignedWith(stock);
-        for (int i = 0; i <= k + 1; i++)
+        Assert.Equal(deltas[k], deltas[k - 1]);
+        Assert.InRange(deltas[k], -16_000, 0);
+        long capAnchorKhz = stock[k].Mhz * 1000L + deltas[k];
+        long flatTopKhz = stock[k + 1].Mhz * 1000L + deltas[k + 1];
+        Assert.Equal(16_000, flatTopKhz - capAnchorKhz);
+        for (int i = k + 2; i < deltas.Length; i++)
         {
-            Assert.True(deltas[i] == 0, $"anchor {i} ({stock[i].Mv} mV) moved by {deltas[i]} kHz below the flat start");
+            Assert.Equal(flatTopKhz, stock[i].Mhz * 1000L + deltas[i]);
         }
 
-        Assert.All(deltas, d => Assert.True(d <= 0, $"a plain cap wrote a positive delta ({d} kHz)"));
         Assert.True(deltas[^1] < -15_000,
             $"the top anchor barely moved ({deltas[^1]} kHz) - the cap did not flatten the curve");
     }
@@ -53,18 +59,18 @@ public sealed class TuningShapeTests
         Assert.Equal(0, exitCode);
         App.AssertWriteConfirmed(output);
 
-        // The cap's offset is one value carried by the band below the cap, the cap anchor and the
-        // flat start above it - that shared offset is what keeps the clock on a stock-parallel
-        // slope however deep the boost settles. Exact equality holds regardless of whether the run
-        // planned from the saved reference or a live read.
-        // The margin is loose on purpose: planned from the saved reference, the written delta is
-        // (live - reference) - 60, so the thermal gap between this run and the reference capture
-        // rides on it. The two equalities below are the actual shape signature; this only has to
-        // prove a real reduction landed.
+        // The cap anchor's offset is one value carried by the band below it - that shared offset is
+        // what keeps the clock on a stock-parallel slope however deep the boost settles - and the
+        // flat top starts exactly the fixed 16 MHz spread above the cap anchor. Both equalities
+        // hold regardless of whether the run planned from the saved reference or a live read.
+        // The margin on the reduction is loose on purpose: planned from the saved reference, the
+        // written delta is (live - reference) - 60, so the thermal gap between this run and the
+        // reference capture rides on it; this only has to prove a real reduction landed.
         int[] deltas = ReadDeltasAlignedWith(stock);
         Assert.True(deltas[k] < -20_000, $"the cap anchor's delta ({deltas[k]} kHz) is not the requested reduction");
         Assert.Equal(deltas[k], deltas[k - 1]);
-        Assert.Equal(deltas[k], deltas[k + 1]);
+        Assert.Equal(16_000,
+            (stock[k + 1].Mhz * 1000L + deltas[k + 1]) - (stock[k].Mhz * 1000L + deltas[k]));
     }
 
     [SkippableFact]
@@ -85,7 +91,7 @@ public sealed class TuningShapeTests
     }
 
     [SkippableFact]
-    public void Status_WhileCapped_ReportsTheCapPoint()
+    public void Status_WhileCapped_ReportsTheOperatingPoint()
     {
         Skip.IfNot(_gpu.Available, _gpu.SkipReason);
         var (stock, k) = ReadStockAndPickAnchor();
@@ -96,14 +102,17 @@ public sealed class TuningShapeTests
 
         var (exitCode, output) = App.Run(null, "status");
 
-        // The status line names the point the boost settles on - the cap anchor. One anchor of
-        // slack: a read at a temperature away from the reference can seam the flat's edge, which
-        // moves the reported point one anchor down (see GpuTuning.EffectiveCapPoint).
+        // The status line names the point the boost settles on: between the cap anchor and one
+        // boost step below the flat start. One anchor of slack each way: a read at a temperature
+        // away from the reference can seam the flat's edge, which moves the inferred point one
+        // anchor - a seamed flat start puts it one boost step below the anchor above the flat
+        // (see GpuTuning.EffectiveOperatingPoint).
         Assert.Equal(0, exitCode);
-        Match m = Regex.Match(output, @"capped at (\d+) mV");
-        Assert.True(m.Success, $"no 'capped at' report in: {output}");
+        Match m = Regex.Match(output, @"operating point (\d+) mV");
+        Assert.True(m.Success, $"no 'operating point' report in: {output}");
         Assert.InRange(int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture),
-            stock[k - 1].Mv, stock[k].Mv);
+            stock[k].Mv - GpuTuning.BoostStepMv,
+            Math.Max(stock[k + 1].Mv, stock[k + 2].Mv - GpuTuning.BoostStepMv));
     }
 
     [SkippableFact]

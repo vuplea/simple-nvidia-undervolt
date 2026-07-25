@@ -147,9 +147,11 @@ operates on.
 ## Development
 
 Every point above the cap anchor is flattened to one frequency through `ClkVfPointsSetControl`;
-the boost algorithm then pins voltage at the cap. A band of `--cap-points` anchors ending at the cap
-shares the cap's offset, so if the realized voltage settles a bin or two below the cap under load,
-an overclocked cap doesn't fall back down the steep stock curve.
+the boost algorithm then pins its operating point just below the flat. The cap→flat segment is
+aimed so the clock at that point is the requested one (measured settle behavior — see
+[DEVELOPMENT.md](DEVELOPMENT.md)). A band of `--cap-points` anchors ending at the cap shares the
+cap anchor's offset, so if the boost settles deeper below the cap under load, an overclocked cap
+doesn't fall back down the steep stock curve.
 Points below the band stay stock; `--mhz` only raises the cap region. After writing, the tool reads the
 curve back to confirm.
 
