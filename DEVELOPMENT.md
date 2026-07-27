@@ -1,35 +1,5 @@
 # Development
 
-## Verify your card
-
-> ⚠️ Undervolting is validated only on the Blackwell generation.
-
-Tuning sanity-checks the read path (the V/F curve must decode as a real table) and, right after
-writing, validates the written curve to confirm the change landed — reverting to stock if anything looks
-wrong. So confirm a card by trying a configuration:
-
-```powershell
-simple-nvidia-undervolt tune --mv 950 --mhz 2800 --no-persist
-# curve should be as applied - optionally use Afterburner to confirm 
-simple-nvidia-undervolt clear # back to stock
-```
-
-Reply [here](https://github.com/vuplea/simple-nvidia-undervolt/issues/1) if successful
-so we mark the generation as supported. If it reverts instead, the offsets don't match
-this card; use the advanced steps below.
-
-## Porting the write offsets to a new card
-
-In an Administrator terminal:
-
-1. Run `clear`, then `snapshot`.
-2. In Afterburner's curve editor (Ctrl+F), raise one point by a clear amount (e.g. +100 MHz at 950 mV),
-   flatten everything to its right, and click Apply.
-3. Run `diff`. The `curveControl` rows it lists are the bytes your change moved: their spacing is
-   `CtrlEntryStride` and their position within an entry is `CtrlDeltaOffset`.
-4. Open an issue with that `diff` output and your `layout` output. Pinning `CtrlEntryBase` from it is the
-   fiddly part, so put both in the bug report and we'll compute the three `Ctrl*` values.
-
 ## Build
 
 ```powershell
@@ -132,3 +102,31 @@ reads ±2,000,000 raw on Pascal and ±1,000,000 on plain-unit cards — both mea
 Pascal architecture id — the signature alone would also match a future plain-unit card that
 genuinely widens its limit to ±2000 MHz, and doubling there overshoots — so the rest of the code
 always works in true kHz.
+
+## Verify your card
+
+Tuning sanity-checks the read path (the V/F curve must decode as a real table) and, right after
+writing, validates the written curve to confirm the change landed — reverting to stock if anything looks
+wrong. So confirm a card by trying a configuration:
+
+```powershell
+simple-nvidia-undervolt tune --mv 950 --mhz 2800 --no-persist
+# curve should be as applied - optionally use Afterburner to confirm 
+simple-nvidia-undervolt clear # back to stock
+```
+
+Reply [here](https://github.com/vuplea/simple-nvidia-undervolt/issues/1) if successful
+so we mark the generation as supported. If it reverts instead, the offsets don't match
+this card; use the advanced steps below.
+
+## Porting the write offsets to a new card
+
+In an Administrator terminal:
+
+1. Run `clear`, then `snapshot`.
+2. In Afterburner's curve editor (Ctrl+F), raise one point by a clear amount (e.g. +100 MHz at 950 mV),
+   flatten everything to its right, and click Apply.
+3. Run `diff`. The `curveControl` rows it lists are the bytes your change moved: their spacing is
+   `CtrlEntryStride` and their position within an entry is `CtrlDeltaOffset`.
+4. Open an issue with that `diff` output and your `layout` output. Pinning `CtrlEntryBase` from it is the
+   fiddly part, so put both in the bug report and we'll compute the three `Ctrl*` values.
