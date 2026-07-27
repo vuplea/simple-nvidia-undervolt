@@ -9,9 +9,9 @@ where the card sits under load, and it sets your peak framerate. To simplify, yo
 desired voltage and frequency pair with this tool. To skip manual investigation of tuning options,
 the tool also offers ready-made profiles.
 
-The tool is expected to work on GTX 10 (Pascal), RTX 20 (Turing), RTX 30 (Ampere), RTX 40 (Ada),
-RTX 50 (Blackwell) generations, but validated only on Blackwell — if it works for you, confirm
-it [here](https://github.com/vuplea/simple-nvidia-undervolt/issues/1). Also read the [disclaimer](#disclaimer) on using the tool.
+The tool is expected to work on GTX 10 (Pascal), RTX 20 (Turing, confirmed), RTX 30 (Ampere), RTX 40 (Ada),
+RTX 50 (Blackwell, confirmed) generations, if it works for you, confirm
+it [here](https://github.com/vuplea/simple-nvidia-undervolt/issues/1).
 
 Download `simple-nvidia-undervolt.exe` from [releases](https://github.com/vuplea/simple-nvidia-undervolt/releases),
 or `simple-nvidia-undervolt-profiles.zip` which contains the tool + ready-made profiles.
