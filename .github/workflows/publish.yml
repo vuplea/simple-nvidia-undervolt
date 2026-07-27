@@ -37,12 +37,6 @@ jobs:
           $version = if ('${{ github.ref_type }}' -eq 'tag') { '${{ github.ref_name }}'.TrimStart('v') } else { '0.0.0' }
           dotnet publish src -c Release -p:Version=$version
 
-      # A SHA256 next to the unsigned exe lets a downloader verify what SmartScreen can't vouch for.
-      - name: Checksum
-        run: >
-          "$((Get-FileHash src/publish/simple-nvidia-undervolt.exe -Algorithm SHA256).Hash.ToLower())  simple-nvidia-undervolt.exe"
-          | Set-Content src/publish/simple-nvidia-undervolt.exe.sha256
-
       # The profiles zip: the per-card-range shortcut tree generated from profiles/profiles.json,
       # PROFILES.md as the zip's README, and an installer-named copy of the exe - double-clicking
       # that copy runs 'install', which the shortcuts need once per machine.
@@ -53,17 +47,13 @@ jobs:
           Copy-Item PROFILES.md "$stage/~README.txt"
           Copy-Item src/publish/simple-nvidia-undervolt.exe "$stage/~install-simple-nvidia-undervolt.exe"
           Compress-Archive -Path "$stage/*" -DestinationPath src/publish/simple-nvidia-undervolt-profiles.zip
-          "$((Get-FileHash src/publish/simple-nvidia-undervolt-profiles.zip -Algorithm SHA256).Hash.ToLower())  simple-nvidia-undervolt-profiles.zip" |
-            Set-Content src/publish/simple-nvidia-undervolt-profiles.zip.sha256
 
       - uses: actions/upload-artifact@v4
         with:
           name: simple-nvidia-undervolt
           path: |
             src/publish/simple-nvidia-undervolt.exe
-            src/publish/simple-nvidia-undervolt.exe.sha256
             src/publish/simple-nvidia-undervolt-profiles.zip
-            src/publish/simple-nvidia-undervolt-profiles.zip.sha256
           if-no-files-found: error
 
       - name: Release
@@ -72,6 +62,4 @@ jobs:
         with:
           files: |
             src/publish/simple-nvidia-undervolt.exe
-            src/publish/simple-nvidia-undervolt.exe.sha256
             src/publish/simple-nvidia-undervolt-profiles.zip
-            src/publish/simple-nvidia-undervolt-profiles.zip.sha256
