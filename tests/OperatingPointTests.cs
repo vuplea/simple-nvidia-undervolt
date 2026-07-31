@@ -115,6 +115,52 @@ public class OperatingPointTests
         Assert.Null(GpuTuning.EffectiveOperatingPoint(TestCurves.Collapsed()));
     }
 
+    // --- the post-apply staircase note (GpuTuning.SnapNote) ---
+
+    [Fact]
+    public void SnapNote_NamesTheHigherSettleWhenTheFlatsTailRoundsUp()
+    {
+        // The measured RTX 5090 925-cap shape: a flat written at 2498 from 935 mV reads back 2497
+        // at 935/940 and 2505 from 945 up. The plateau pinning the boost starts at 945, so it
+        // settles at 940 / ~2497 - what the note must name instead of the promised 930.
+        var effective = new List<(int Mv, int Mhz)>
+        {
+            (915, 2437), (920, 2452), (925, 2482), (935, 2497), (940, 2497),
+            (945, 2505), (950, 2505), (960, 2505), (965, 2505),
+        };
+
+        string note = GpuTuning.SnapNote(effective, (935, 2497));
+
+        Assert.Contains("from 945 mV up", note);
+        Assert.Contains("settle at 940 mV / ~2497 MHz", note);
+    }
+
+    [Fact]
+    public void SnapNote_IsSilentOnAUniformlyRealizedFlat()
+    {
+        // The flat read back level at one clock - the plateau starts where it was written and the
+        // main report already names the right point.
+        var stock = TestCurves.Realistic();
+        var plan = GpuTuning.BuildCurvePlan(stock, capMv: 1000, targetMhz: null, capPoints: 8);
+        var effective = TestCurves.Effective(stock, plan.DeltasKhz);
+
+        Assert.Equal(string.Empty,
+            GpuTuning.SnapNote(effective, (plan.FlatMv, plan.FlatMhz)));
+    }
+
+    [Fact]
+    public void SnapNote_IsSilentOnSubBinWobble()
+    {
+        // A tail reading a few MHz above the flat start is read-back noise, not a split plateau.
+        var stock = TestCurves.Realistic();
+        var plan = GpuTuning.BuildCurvePlan(stock, capMv: 1000, targetMhz: null, capPoints: 8);
+        var effective = TestCurves.Effective(stock, plan.DeltasKhz);
+        effective[^1] = (effective[^1].Mv, effective[^1].Mhz + 3);
+
+        Assert.Equal(string.Empty,
+            GpuTuning.SnapNote(effective, (plan.FlatMv, plan.FlatMhz)));
+    }
+
     // --- status rendering (TuningSnapshot.DescribeCoreCurve) ---
 
     private static TuningSnapshot Snapshot(int[] offsetsKhz, (int Mv, int Mhz)? point) => new()

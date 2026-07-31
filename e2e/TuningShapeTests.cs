@@ -102,17 +102,18 @@ public sealed class TuningShapeTests
 
         var (exitCode, output) = App.Run(null, "status");
 
-        // The status line names the point the boost settles on: between the cap anchor and one
-        // boost step below the flat start. One anchor of slack each way: a read at a temperature
-        // away from the reference can seam the flat's edge, which moves the inferred point one
-        // anchor - a seamed flat start puts it one boost step below the anchor above the flat
-        // (see GpuTuning.EffectiveOperatingPoint).
+        // The status line names the point the boost settles on: at or above the cap point, with
+        // wide-but-bounded slack upward. The driver can round the written flatten's tail a bin
+        // up, which starts the pinning plateau - and moves the inferred point - a few anchors
+        // above the written flat start (the post-apply report carries a note when it does); a
+        // read at a temperature away from the reference can seam the flat's edge similarly. The
+        // settle-law physics itself is LoadTests' subject; this asserts status reports a sane
+        // point near the cap.
         Assert.Equal(0, exitCode);
         Match m = Regex.Match(output, @"operating point (\d+) mV");
         Assert.True(m.Success, $"no 'operating point' report in: {output}");
         Assert.InRange(int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture),
-            stock[k].Mv - GpuTuning.BoostStepMv,
-            Math.Max(stock[k + 1].Mv, stock[k + 2].Mv - GpuTuning.BoostStepMv));
+            stock[k].Mv - GpuTuning.BoostStepMv, stock[k].Mv + 25);
     }
 
     [SkippableFact]

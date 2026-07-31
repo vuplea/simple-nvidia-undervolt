@@ -75,10 +75,20 @@ settles. NVIDIA doesn't document this; measured on an RTX 5090 under sustained l
   settle drops 5 mV lower; 16 MHz holds. On generations with ~15 MHz bins, 16 MHz is one bin and
   may fold — degrading to less clock at less voltage (the safe direction), which the post-apply
   report flags when the rise reads back collapsed.
+- **A level flat can read back as a two-step staircase**: a flat written near a bin edge can keep
+  its first anchor(s) at the written clock while the tail rounds a bin up (a 925 mV cap's flat of
+  2498: 935/940 mV read 2497, 945 mV+ read 2505). The plateau pinning the boost is then the tail,
+  and the settle follows it up — 940 mV instead of the aimed 930. A stable realized state, not a
+  thermal transient: the staircase and the settle hold unchanged from 45 to 61 C with the deltas
+  frozen, against a stock table matching the reference anchor-for-anchor. Which anchors round
+  which way isn't predictable from the written value alone (the same 2498 rounds both ways within
+  one write; a 2408 flat rounds up to 2415 uniformly), so the plan doesn't try to pre-compensate;
+  the post-apply report names the higher point from the read-back instead.
 
 `GpuTuning.BuildCurvePlan` therefore writes the cap→flat segment as a straight line through
 (settle voltage, requested clock) with a fixed 16 MHz rise: the smallest the driver keeps, and a
-bound on the realized miss at half of it. On a 10 mV gap this operates the card 5 mV above the
+bound on the realized miss at half of it — one bin more when the flat's tail rounds up, which the
+report calls out. On a 10 mV gap this operates the card 5 mV above the
 named cap (`--mv 900` runs at 905 mV); keeping the voltage at or under the cap would cost a
 stock-slope step of clock, the worse side of the trade.
 

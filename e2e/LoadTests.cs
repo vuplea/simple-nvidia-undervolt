@@ -34,7 +34,7 @@ public sealed class LoadTests : IClassFixture<GpuLoadFixture>
         App.AssertWriteConfirmed(output);
 
         var (settleMv, settleMhz) = SampleSettledPointOrSkip();
-        AssertSettledOnTheCap(stock, k, settleMv);
+        AssertSettledOnTheEffectiveCap(stock, k, settleMv);
 
         // ...at the cap point's own stock clock, wherever in the anchor gap the settle voltage
         // falls - the straddle holds the requested clock at the settle point, so the tolerance is
@@ -54,7 +54,7 @@ public sealed class LoadTests : IClassFixture<GpuLoadFixture>
         App.AssertWriteConfirmed(output);
 
         var (settleMv, settleMhz) = SampleSettledPointOrSkip();
-        AssertSettledOnTheCap(stock, k, settleMv);
+        AssertSettledOnTheEffectiveCap(stock, k, settleMv);
 
         // The requested clock is held at the settle point. The flatten-at-the-cap shape fails this
         // (and the voltage check above): the boost lands one anchor below the cap, a stock-slope
@@ -93,12 +93,21 @@ public sealed class LoadTests : IClassFixture<GpuLoadFixture>
         return (stock, StockProbe.PickCapAnchor(stock));
     }
 
-    /// <summary>Asserts the settled voltage is the cap point: at the cap anchor, or inside the gap
-    /// to the next anchor (a 10 mV anchor gap leaves the boost one 5 mV step below the flat start,
-    /// between the two). A flatten-at-the-cap shape settles one step BELOW the cap, so the lower
-    /// bound is what this test exists for.</summary>
-    private static void AssertSettledOnTheCap(IReadOnlyList<(int Mv, int Mhz)> stock, int k, int settleMv)
-        => Assert.InRange(settleMv, stock[k].Mv - 2, stock[k + 1].Mv - 5 + 2);
+    /// <summary>Asserts the settled voltage obeys the settle law against the curve the card
+    /// actually holds: no lower than the cap point (a flatten-at-the-cap shape settles one step
+    /// BELOW the cap, which is what the lower bound exists to catch) and no higher than one boost
+    /// step below the effective top plateau's first anchor. The upper bound comes from the
+    /// read-back rather than the written shape because the driver can round the written flat's
+    /// tail a bin up, moving the plateau — and the settle — one or more anchors above the written
+    /// flat start (the post-apply report carries a note when it does). The clock assertion beside
+    /// each call bounds the plateau's height, so a wrong written shape can't vouch for itself
+    /// through its own wrong plateau.</summary>
+    private void AssertSettledOnTheEffectiveCap(IReadOnlyList<(int Mv, int Mhz)> stock, int k, int settleMv)
+    {
+        (int Mv, int Mhz)? point = GpuTuning.EffectiveOperatingPoint(NvApi.GetVfCurve(_gpu.Gpu));
+        Skip.If(point is null, "the effective curve didn't read back cleanly - retry.");
+        Assert.InRange(settleMv, stock[k].Mv - 2, point!.Value.Mv + 2);
+    }
 
     /// <summary>The point the boost settled on: after a warm-up pause, samples the live telemetry
     /// until one voltage dominates, returning it with its average clock. A power-limited card skips —

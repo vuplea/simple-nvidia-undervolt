@@ -855,8 +855,9 @@ internal static class GpuTuning
         }
 
         int settleMv = Math.Max(cap.Mv, flat.Mv - BoostStepMv);
-        string note = FoldNote(written[flatStart].Mhz - written[flatStart - 1].Mhz, flat.Mhz - cap.Mhz);
-        return new[] { $"{line}; operating point {settleMv} mV / ~{SegmentClockAt(cap, flat, settleMv)} MHz{note}." };
+        string notes = FoldNote(written[flatStart].Mhz - written[flatStart - 1].Mhz, flat.Mhz - cap.Mhz)
+                       + SnapNote(effective, flat);
+        return new[] { $"{line}; operating point {settleMv} mV / ~{SegmentClockAt(cap, flat, settleMv)} MHz{notes}." };
     }
 
     /// <summary>The effective read-back a write confirmation judges, or null with the no-verdict
@@ -1103,6 +1104,38 @@ internal static class GpuTuning
             ? $" - the cap-to-flat rise reads back collapsed, so the boost may settle {BoostStepMv} mV lower"
             : string.Empty;
 
+    /// <summary>The <see cref="FoldNote"/> mirror for the other direction: the driver rounds every
+    /// anchor onto a clock bin, and a flat written near a bin edge can keep its first anchor(s) at
+    /// the written clock while the tail rounds a bin up. The plateau pinning the boost is then the
+    /// tail, and the boost settles one boost step below <em>its</em> first anchor — above the
+    /// written flat start, at the tail's clock. A stable realized state, not only a transient: the
+    /// staircase and the settle hold across a 45-61 C swing with the deltas frozen (measured, see
+    /// DEVELOPMENT.md, "Where the boost settles"). The named point comes from the effective
+    /// curve's top plateau — the same inference a tilted transient read can walk up, hence "may";
+    /// a later <c>status</c> read settles which it was. <paramref name="flat"/> is the effective
+    /// point at the written flat start.</summary>
+    internal static string SnapNote(IReadOnlyList<(int Mv, int Mhz)> effective, (int Mv, int Mhz) flat)
+    {
+        // The written flat runs level to the curve's top, so a top anchor reading a near-bin rise
+        // above the flat start's own read-back means the flat came back staircased; below that it
+        // is read wobble, not a plateau split.
+        if (effective.Count == 0 || effective[^1].Mhz < flat.Mhz + 4)
+        {
+            return string.Empty;
+        }
+
+        int top = FlatStartIndex(effective);
+        if (top <= 0 || effective[top].Mv <= flat.Mv)
+        {
+            return string.Empty;
+        }
+
+        (int Mv, int Mhz) below = effective[top - 1];
+        int settleMv = Math.Max(below.Mv, effective[top].Mv - BoostStepMv);
+        return $" - the flatten's tail reads back a bin higher from {effective[top].Mv} mV up, so the "
+               + $"boost may settle at {settleMv} mV / ~{SegmentClockAt(below, effective[top], settleMv)} MHz";
+    }
+
     /// <summary>The effective curve's point at an anchor voltage the plan names (the cap anchor, the
     /// flat start), carrying the clock the read-back shows there. The plan names its anchors
     /// outright, so unlike <see cref="EffectiveOperatingPoint"/> this needs no inference from the
@@ -1173,7 +1206,7 @@ internal static class GpuTuning
             }
         }
 
-        return new[] { line + FoldNote(plan.FlatMhz - plan.CapMhz, flat.Mhz - cap.Mhz) };
+        return new[] { line + FoldNote(plan.FlatMhz - plan.CapMhz, flat.Mhz - cap.Mhz) + SnapNote(effective, flat) };
     }
 
     /// <summary>The per-anchor frequency deltas currently applied, index-aligned with the curve.</summary>
