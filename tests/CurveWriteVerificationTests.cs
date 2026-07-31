@@ -114,7 +114,8 @@ public class CurveWriteVerificationTests
         // No anchor is flattened down, so there is no reliable signal (a raise the driver may clamp).
         var changes = new[] { new GpuTuning.CurveChange(1000, 2500, 2600, 100_000) };
         var plan = new GpuTuning.CurvePlan(SettleMv: 1015, SettleMhz: 2638, CapMv: 1000, CapMhz: 2600,
-            FlatMv: 1020, FlatMhz: 2650, changes, DeltasKhz: Array.Empty<int>());
+            FlatMv: 1020, FlatMhz: 2650, changes, DeltasKhz: Array.Empty<int>(),
+            CapIndex: 10, CapPoints: 8);
 
         Assert.Equal(GpuTuning.WriteVerification.Unverifiable,
             GpuTuning.VerifyWriteReachedCurve(plan, TestCurves.Realistic()));

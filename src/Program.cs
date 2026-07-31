@@ -612,7 +612,7 @@ internal static class Cli
         {
             PrintIndented(request.DryRun
                 ? GpuTuning.DescribePlan(plan, targetMhz)
-                : GpuTuning.Apply(gpu, plan, targetMhz, memory?.DeltaKhz, referenceBaseline));
+                : GpuTuning.Apply(gpu, plan, planStock!, targetMhz, memory?.DeltaKhz, referenceBaseline));
         }
         else if (memory is { } mem)
         {

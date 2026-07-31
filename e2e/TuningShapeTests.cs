@@ -27,18 +27,20 @@ public sealed class TuningShapeTests
         Assert.Equal(0, exitCode);
         App.AssertWriteConfirmed(output);
 
-        // The shape signature, exact in the written deltas: the cap anchor and the band below share
-        // one offset at most a spread below stock (the segment is aimed so the settle voltage holds
-        // the stock clock, which writes the cap anchor a little under it), the flat top starts
-        // exactly the fixed 16 MHz spread above the cap anchor, and everything from there up is one
-        // level plateau. A flatten-at-the-cap shape would leave no rise between k and k+1; the
+        // The shape signature in the written deltas: the cap anchor and the band below share one
+        // offset near a spread below stock (the segment is aimed so the settle voltage holds the
+        // stock clock, which writes the cap anchor a little under it), the flat top starts about
+        // the fixed 16 MHz spread above the cap anchor, and everything from there up is one level
+        // plateau. The rise and the cap offset carry a bin of slack each way: the post-write
+        // refinement may move either by a few MHz to land the settle on the card's bin grid. A
+        // flatten-at-the-cap shape would leave no rise between k and k+1; the
         // stock-slope-continued shape would show a stock-step rise instead of the fixed spread.
         int[] deltas = ReadDeltasAlignedWith(stock);
         Assert.Equal(deltas[k], deltas[k - 1]);
-        Assert.InRange(deltas[k], -16_000, 0);
+        Assert.InRange(deltas[k], -24_000, 8_000);
         long capAnchorKhz = stock[k].Mhz * 1000L + deltas[k];
         long flatTopKhz = stock[k + 1].Mhz * 1000L + deltas[k + 1];
-        Assert.Equal(16_000, flatTopKhz - capAnchorKhz);
+        Assert.InRange(flatTopKhz - capAnchorKhz, 8_000, 24_000);
         for (int i = k + 2; i < deltas.Length; i++)
         {
             Assert.Equal(flatTopKhz, stock[i].Mhz * 1000L + deltas[i]);
@@ -61,16 +63,18 @@ public sealed class TuningShapeTests
 
         // The cap anchor's offset is one value carried by the band below it - that shared offset is
         // what keeps the clock on a stock-parallel slope however deep the boost settles - and the
-        // flat top starts exactly the fixed 16 MHz spread above the cap anchor. Both equalities
-        // hold regardless of whether the run planned from the saved reference or a live read.
+        // flat top starts about the fixed 16 MHz spread above the cap anchor, with a bin of slack
+        // each way for the post-write refinement. Both hold regardless of whether the run planned
+        // from the saved reference or a live read.
         // The margin on the reduction is loose on purpose: planned from the saved reference, the
         // written delta is (live - reference) - 60, so the thermal gap between this run and the
         // reference capture rides on it; this only has to prove a real reduction landed.
         int[] deltas = ReadDeltasAlignedWith(stock);
         Assert.True(deltas[k] < -20_000, $"the cap anchor's delta ({deltas[k]} kHz) is not the requested reduction");
         Assert.Equal(deltas[k], deltas[k - 1]);
-        Assert.Equal(16_000,
-            (stock[k + 1].Mhz * 1000L + deltas[k + 1]) - (stock[k].Mhz * 1000L + deltas[k]));
+        Assert.InRange(
+            (stock[k + 1].Mhz * 1000L + deltas[k + 1]) - (stock[k].Mhz * 1000L + deltas[k]),
+            8_000, 24_000);
     }
 
     [SkippableFact]
@@ -102,18 +106,18 @@ public sealed class TuningShapeTests
 
         var (exitCode, output) = App.Run(null, "status");
 
-        // The status line names the point the boost settles on: at or above the cap point, with
-        // wide-but-bounded slack upward. The driver can round the written flatten's tail a bin
-        // up, which starts the pinning plateau - and moves the inferred point - a few anchors
-        // above the written flat start (the post-apply report carries a note when it does); a
-        // read at a temperature away from the reference can seam the flat's edge similarly. The
-        // settle-law physics itself is LoadTests' subject; this asserts status reports a sane
-        // point near the cap.
+        // The status line names the point the boost settles on. The apply refines its write
+        // against the read-back until the realized point is the plan's settle (one boost step
+        // below the flat start, floored at the cap), so a same-power-state status read moments
+        // later reports that point - one boost step of slack each way covers an anchor stepping
+        // with temperature between the two reads, and a refinement that ran out of probes on a
+        // knife-edge write. The settle-law physics itself is LoadTests' subject.
         Assert.Equal(0, exitCode);
         Match m = Regex.Match(output, @"operating point (\d+) mV");
         Assert.True(m.Success, $"no 'operating point' report in: {output}");
+        int settleMv = Math.Max(stock[k].Mv, stock[k + 1].Mv - GpuTuning.BoostStepMv);
         Assert.InRange(int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture),
-            stock[k].Mv - GpuTuning.BoostStepMv, stock[k].Mv + 25);
+            settleMv - GpuTuning.BoostStepMv, settleMv + GpuTuning.BoostStepMv);
     }
 
     [SkippableFact]
