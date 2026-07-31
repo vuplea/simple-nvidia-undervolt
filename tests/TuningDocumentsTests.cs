@@ -452,6 +452,39 @@ public class TuningDocumentsTests
         Assert.Equal(-2_450_000, Resolve(doc, curve)[10]);
     }
 
+    [Fact]
+    public void ResolveCurveOffsets_RefusesAnAbsoluteClockAtAFloorPinnedAnchor()
+    {
+        // An absolute clock derives its offset from the stock clock at the anchor, which a
+        // floor-pinned stock read doesn't hold - deriving against the pinned 202 would turn a
+        // mild target into a huge positive delta. A named refusal, not a wrong write.
+        var idle = TestCurves.IdleFloorPinned(pinned: 8, floorMhz: 202);
+        var doc = new TuningDoc
+        {
+            Curve = new[] { new CurveEntryDoc { Mv = idle[5].Mv, Mhz = 900 } },
+        };
+
+        Assert.Throws<CliError>(() => Resolve(doc, idle));
+    }
+
+    [Fact]
+    public void ResolveCurveOffsets_ResolvesAnAbsoluteClockAgainstASavedReferenceAtIdle()
+    {
+        // With a saved reference the stock clock is known regardless of power state: the offset
+        // derives from the reference, and the pinned anchor's minimum exemption lets the small
+        // result through.
+        var idle = TestCurves.IdleFloorPinned(pinned: 8, floorMhz: 202);
+        var reference = TestCurves.Realistic();
+        var doc = new TuningDoc
+        {
+            Curve = new[] { new CurveEntryDoc { Mv = idle[5].Mv, Mhz = reference[5].Mhz - 120 } },
+        };
+
+        int[] deltasKhz = TuningDocuments.ResolveCurveOffsetsKhz(doc, idle, () => reference, "The tuning");
+
+        Assert.Equal(-120_000, deltasKhz[5]);
+    }
+
     private static int[] Resolve(TuningDoc doc, IReadOnlyList<(int Mv, int Mhz)> stock)
         => TuningDocuments.ResolveCurveOffsetsKhz(doc, stock, () => stock, "The tuning");
 

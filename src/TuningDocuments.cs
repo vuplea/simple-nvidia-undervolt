@@ -412,7 +412,9 @@ internal static class TuningDocuments
     /// document: that is the structural guard against a different card's curve. An entry without
     /// an offset resolves it from its absolute clock against <paramref name="stock"/> — the saved
     /// reference curve, or a stock read, index-aligned with <paramref name="anchors"/> — invoked
-    /// lazily, so a document of plain offsets (every export this tool writes) never needs it.
+    /// lazily, so a document of plain offsets (every export this tool writes) never needs it —
+    /// and refused when the stock read backing it sits at the idle floor itself, where no offset
+    /// can be derived (save a reference curve instead).
     /// Each resolved clock is held to the planned path's plausible range — a replay must not
     /// write offsets no plan could have produced. The range's minimum is not enforced at anchors
     /// reading at the curve's floor clock (<see cref="GpuTuning.AtFloorClock"/>): at deep idle —
@@ -443,7 +445,26 @@ internal static class TuningDocuments
             int i = anchorIndices[e];
             CurveEntryDoc entry = entries[e];
 
-            long offsetMhz = entry.Offset ?? entry.Mhz!.Value - Stock()[i].Mhz;
+            // An absolute clock derives its offset from the anchor's stock clock, which a
+            // floor-pinned stock read doesn't hold - the derivation would fold the pinning error
+            // into the offset (a silent overclock by up to the anchor's whole stock clock), so
+            // it refuses instead. A saved reference curve, captured awake, resolves it.
+            long offsetMhz;
+            if (entry.Offset is { } offset)
+            {
+                offsetMhz = offset;
+            }
+            else if (GpuTuning.AtFloorClock(Stock(), i))
+            {
+                throw new CliError($"{what} sets an absolute clock at the {entry.Mv} mV anchor, "
+                    + "but the stock clock there currently reads at the idle floor, so the "
+                    + "offset to write can't be derived - retry with the card awake, or save a "
+                    + "reference curve first (set-reference-curve).");
+            }
+            else
+            {
+                offsetMhz = entry.Mhz!.Value - Stock()[i].Mhz;
+            }
 
             // A replay must not write what no plan could have produced (RunReplay holds the
             // memory offset to the same standard). The offset alone is bounded first, so a
