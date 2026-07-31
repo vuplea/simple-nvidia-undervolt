@@ -659,6 +659,19 @@ internal static class GpuTuning
     /// transitional collapse dips by hundreds of MHz, so it still fails.</summary>
     private const int MaxBenignDipMhz = 25;
 
+    /// <summary>Whether an anchor reads at the curve's floor clock — within a read-back bin
+    /// (<see cref="CurveBinMhz"/>) of anchor 0. At deep idle the driver pins the lowest anchors
+    /// at an idle floor clock (~200 MHz) instead of their stock clocks — a steady state
+    /// <see cref="CurveFreqsReadable"/> accepts — so a floor-tied clock may be that power-state
+    /// artifact, with the anchor's stock clock unobservable behind it: a judgment that needs the
+    /// stock clock skips or refuses the anchor. Keyed to anchor 0, not an absolute threshold
+    /// (idle floors vary by card), and per anchor, not a leading run — a clean read may wobble a
+    /// pinned anchor up a bin (<see cref="MaxBenignDipMhz"/>), which must not strip the anchors
+    /// after it. On an active read only anchor 0 and any same-bin neighbours tie the floor, and
+    /// those genuinely read the curve's minimum clock.</summary>
+    internal static bool AtFloorClock(IReadOnlyList<(int Mv, int Mhz)> curve, int i)
+        => curve[i].Mhz <= curve[0].Mhz + CurveBinMhz;
+
     /// <summary>Whether the curve's <em>voltage</em> axis looks like a real NVIDIA V/F table: a long,
     /// ascending run of plausible core voltages. The voltage column is power-state
     /// independent (unlike the frequency column <see cref="CurveFreqsReadable"/> guards), so this

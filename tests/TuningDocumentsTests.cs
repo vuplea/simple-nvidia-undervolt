@@ -360,6 +360,98 @@ public class TuningDocumentsTests
         Assert.Throws<CliError>(() => Resolve(doc, stock));
     }
 
+    [Theory]
+    [InlineData(-8)]     // a plan's own cap band offset
+    [InlineData(-1100)]  // deeper than any plan on this curve - the exemption doesn't judge size
+    public void ResolveCurveOffsets_ExemptsFloorPinnedAnchorsFromTheResolvedMinimum(int offsetMhz)
+    {
+        // At deep idle - the state the logon re-apply runs in - the lowest anchors read at the
+        // idle floor clock, not their stock clocks, so a negative offset there resolves below
+        // the plausible minimum without being implausible at all: the written delta lands on the
+        // driver's true table. The 202 MHz floor sits two above the 200 MHz minimum - what makes
+        // even the -8 case resolve under it.
+        var idle = TestCurves.IdleFloorPinned(pinned: 8, floorMhz: 202);
+        var doc = new TuningDoc
+        {
+            Curve = new[] { new CurveEntryDoc { Mv = idle[5].Mv, Offset = offsetMhz } },
+        };
+
+        Assert.Equal(offsetMhz * 1000, Resolve(doc, idle)[5]);
+    }
+
+    [Fact]
+    public void ResolveCurveOffsets_ExemptsAFloorAnchorBehindAReadWobble()
+    {
+        // A clean read may wobble a pinned anchor up a bin or two (202, 220, 202 stays within
+        // the benign-dip tolerance); the floor anchors after it are exempt all the same - the
+        // floor test is per anchor, not a run broken by the first excursion.
+        var idle = TestCurves.IdleFloorPinned(pinned: 8, floorMhz: 202);
+        idle[3] = (idle[3].Mv, 220);
+        var doc = new TuningDoc
+        {
+            Curve = new[] { new CurveEntryDoc { Mv = idle[5].Mv, Offset = -8 } },
+        };
+
+        Assert.Equal(-8000, Resolve(doc, idle)[5]);
+    }
+
+    [Fact]
+    public void ResolveCurveOffsets_StillHoldsUnpinnedAnchorsToTheResolvedMinimum()
+    {
+        // Above the pinned run the read is the anchor's real clock, so the minimum stands.
+        var idle = TestCurves.IdleFloorPinned(pinned: 8, floorMhz: 202);   // anchor 8 reads 402
+        var doc = new TuningDoc
+        {
+            Curve = new[] { new CurveEntryDoc { Mv = idle[8].Mv, Offset = -300 } },
+        };
+
+        Assert.Throws<CliError>(() => Resolve(doc, idle));
+    }
+
+    [Fact]
+    public void ResolveCurveOffsets_StillHoldsFloorPinnedAnchorsToTheResolvedCeiling()
+    {
+        // Only the minimum is exempt at the floor - a clock above any real core is refused
+        // everywhere. +3900 stays under the offset-magnitude bound, so the ceiling alone judges
+        // (202 + 3900 = 4102).
+        var idle = TestCurves.IdleFloorPinned(pinned: 8, floorMhz: 202);
+        var doc = new TuningDoc
+        {
+            Curve = new[] { new CurveEntryDoc { Mv = idle[5].Mv, Offset = 3900 } },
+        };
+
+        Assert.Throws<CliError>(() => Resolve(doc, idle));
+    }
+
+    [Fact]
+    public void ExportedPlan_ResolvesAgainstAnIdleRead()
+    {
+        // The logon path end to end: a tuning planned and exported awake re-applies at deep
+        // idle, where the baseline read pins the lowest anchors at the floor. The cap band's
+        // small negative offsets land on those anchors and must resolve to the deltas the plan
+        // wrote.
+        var awake = TestCurves.Realistic();
+        var plan = GpuTuning.BuildCurvePlan(awake, capMv: awake[10].Mv, targetMhz: null, capPoints: 8);
+        TuningDoc doc = Tuning(awake, plan.DeltasKhz);
+
+        Assert.Equal(plan.DeltasKhz, Resolve(doc, TestCurves.IdleFloorPinned(pinned: 8, floorMhz: 202)));
+    }
+
+    [Fact]
+    public void ResolveCurveOffsets_SkipsTheResolvedBoundOnAnUnreadableTable()
+    {
+        // A dry run can resolve against a transitional live table; the resolved-clock judgments
+        // are meaningless there and must not fire (the offset-magnitude bound still does).
+        var curve = TestCurves.Realistic();
+        curve[7] = (curve[7].Mv, 50);              // a collapsed point - not a clean read
+        var doc = new TuningDoc
+        {
+            Curve = new[] { new CurveEntryDoc { Mv = curve[10].Mv, Offset = -2450 } },
+        };
+
+        Assert.Equal(-2_450_000, Resolve(doc, curve)[10]);
+    }
+
     private static int[] Resolve(TuningDoc doc, IReadOnlyList<(int Mv, int Mhz)> stock)
         => TuningDocuments.ResolveCurveOffsetsKhz(doc, stock, () => stock, "The tuning");
 

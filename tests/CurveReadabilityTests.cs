@@ -1,7 +1,9 @@
 namespace SimpleNvidiaUndervolt.Tests;
 
-/// <summary>Tests for <see cref="GpuTuning.CurveFreqsReadable"/>, which decides whether the live
-/// frequency column is a clean read or a transitional collapse that must not be acted on.</summary>
+/// <summary>Tests for the judgments made on a raw curve read: whether the frequency column is a
+/// clean read (<see cref="GpuTuning.CurveFreqsReadable"/>), whether an anchor reads at the idle
+/// floor (<see cref="GpuTuning.AtFloorClock"/>), and whether the voltage axis is a real table
+/// (<see cref="GpuTuning.CurveVoltsPlausible"/>).</summary>
 public class CurveReadabilityTests
 {
     [Fact]
@@ -61,12 +63,42 @@ public class CurveReadabilityTests
     }
 
     [Fact]
+    public void AFloorPinnedIdleCurve_IsReadable()
+    {
+        // Deep idle is a steady state, not a transition: the lowest anchors pin at the idle floor
+        // clock while the top still reads real boost clocks. Polling can't improve it - the card
+        // may sit idle indefinitely (the logon re-apply always runs there) - so it must pass.
+        Assert.True(GpuTuning.CurveFreqsReadable(TestCurves.IdleFloorPinned()));
+    }
+
+    [Fact]
     public void ALowBoostMobileCurve_IsReadable()
     {
         // A power-limited mobile part can top out well below a desktop boost clock (1270 MHz here);
         // the boost threshold tolerates it while the wholesale collapse above still fails.
         var lowClock = Enumerable.Range(0, 20).Select(i => (800 + i * 20, 700 + i * 30)).ToList();
         Assert.True(GpuTuning.CurveFreqsReadable(lowClock));
+    }
+
+    // AtFloorClock marks anchors reading at the curve's floor clock - at deep idle a pinned,
+    // power-state clock that must not be judged as if it were stock.
+
+    [Fact]
+    public void AtFloorClock_MarksTheIdleReadsPinnedAnchors()
+    {
+        var idle = TestCurves.IdleFloorPinned(pinned: 8, floorMhz: 202);
+        Assert.True(GpuTuning.AtFloorClock(idle, 7));    // the pinned run's top anchor
+        Assert.False(GpuTuning.AtFloorClock(idle, 8));   // the first real clock above it
+    }
+
+    [Theory]
+    [InlineData(15, true)]   // one read-back bin above the floor still reads as the floor
+    [InlineData(16, false)]  // beyond the bin it is a real clock of its own
+    public void AtFloorClock_ToleratesExactlyOneReadBackBin(int aboveFloorMhz, bool atFloor)
+    {
+        var curve = TestCurves.Realistic();
+        curve[1] = (curve[1].Mv, curve[0].Mhz + aboveFloorMhz);
+        Assert.Equal(atFloor, GpuTuning.AtFloorClock(curve, 1));
     }
 
     // CurveVoltsPlausible gates *writing*: it accepts any card whose voltage axis looks like a real

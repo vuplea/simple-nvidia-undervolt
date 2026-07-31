@@ -413,19 +413,26 @@ internal static class TuningDocuments
     /// an offset resolves it from its absolute clock against <paramref name="stock"/> — the saved
     /// reference curve, or a stock read, index-aligned with <paramref name="anchors"/> — invoked
     /// lazily, so a document of plain offsets (every export this tool writes) never needs it.
-    /// Each resolved clock is held to the planned path's plausible range: a replay must not write
-    /// offsets no plan could have produced.
+    /// Each resolved clock is held to the planned path's plausible range — a replay must not
+    /// write offsets no plan could have produced. The range's minimum is not enforced at anchors
+    /// reading at the curve's floor clock (<see cref="GpuTuning.AtFloorClock"/>): at deep idle —
+    /// the state the logon re-apply runs in — those anchors read an idle floor clock near the
+    /// minimum instead of their stock clocks, so any negative offset there (an undervolt's cap
+    /// band included) would resolve under it and refuse a document the planned path itself
+    /// produced. Such an anchor keeps the ceiling and the offset-magnitude bound — the only
+    /// judgments its pinned read can still support.
     /// </summary>
     public static int[] ResolveCurveOffsetsKhz(TuningDoc doc, IReadOnlyList<(int Mv, int Mhz)> anchors,
         Func<IReadOnlyList<(int Mv, int Mhz)>> stock, string what)
     {
         IReadOnlyList<(int Mv, int Mhz)>? stockCurve = null;
-        int StockMhzAt(int index) => (stockCurve ??= stock())[index].Mhz;
+        IReadOnlyList<(int Mv, int Mhz)> Stock() => stockCurve ??= stock();
 
         // The resolved-clock bound below measures against the anchor's own clock - the clean
         // post-reset stock read on the real write path. It is skipped when the frequency column
         // isn't a clean read (a dry run against a transitional live table), like every other
-        // frequency-dependent judgment.
+        // frequency-dependent judgment; the minimum is also skipped per anchor at the floor
+        // (AtFloorClock), where the resolved value measures the power state, not the write.
         bool freqsReadable = GpuTuning.CurveFreqsReadable(anchors);
 
         int[] anchorIndices = MatchAnchors(doc, anchors, what);
@@ -435,15 +442,18 @@ internal static class TuningDocuments
         {
             int i = anchorIndices[e];
             CurveEntryDoc entry = entries[e];
-            long offsetMhz = entry.Offset ?? entry.Mhz!.Value - StockMhzAt(i);
+
+            long offsetMhz = entry.Offset ?? entry.Mhz!.Value - Stock()[i].Mhz;
 
             // A replay must not write what no plan could have produced (RunReplay holds the
             // memory offset to the same standard). The offset alone is bounded first, so a
             // hand-edited value can't overflow the kHz arithmetic below.
             long resolvedMhz = anchors[i].Mhz + offsetMhz;
+            bool resolvedImplausible = resolvedMhz > TuneRequest.MaxPlausibleCoreClockMhz
+                                       || (resolvedMhz < TuneRequest.MinPlausibleCoreClockMhz
+                                           && !GpuTuning.AtFloorClock(anchors, i));
             if (Math.Abs(offsetMhz) > TuneRequest.MaxPlausibleCoreClockMhz
-                || (freqsReadable && resolvedMhz is < TuneRequest.MinPlausibleCoreClockMhz
-                                                   or > TuneRequest.MaxPlausibleCoreClockMhz))
+                || (freqsReadable && resolvedImplausible))
             {
                 throw new CliError($"{what} tunes the {entry.Mv} mV anchor by {offsetMhz:+0;-0} MHz "
                     + $"to ~{resolvedMhz} MHz - outside the plausible "

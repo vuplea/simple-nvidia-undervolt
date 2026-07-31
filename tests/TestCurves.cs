@@ -17,6 +17,16 @@ internal static class TestCurves
     public static List<(int Mv, int Mhz)> Collapsed()
         => Enumerable.Range(0, 20).Select(i => (800 + i * 20, 195)).ToList();
 
+    /// <summary>A curve as Blackwell reads it at deep idle: <paramref name="pinned"/> anchors
+    /// pinned at <paramref name="floorMhz"/>, the rest rising 200 MHz per anchor to real boost
+    /// clocks. Passes <see cref="GpuTuning.CurveFreqsReadable"/> (a steady state: monotonic, the
+    /// top reaches a boost clock) while the pinned anchors' clocks are power-state artifacts, not
+    /// their stock clocks. The same 20 mV voltage steps as <see cref="Realistic"/>, so a document
+    /// built against one resolves against the other.</summary>
+    public static List<(int Mv, int Mhz)> IdleFloorPinned(int pinned = 8, int floorMhz = 202)
+        => Enumerable.Range(0, 20).Select(i => (800 + i * 20,
+            i < pinned ? floorMhz : floorMhz + (i - pinned + 1) * 200)).ToList();
+
     /// <summary>A very short curve — the shape <see cref="NvApi.GetVfCurve"/> returns when the status
     /// buffer offsets don't match the hardware, so it breaks out after only a few plausible-looking
     /// points. Too short to be a real V/F table.</summary>
