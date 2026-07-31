@@ -96,9 +96,9 @@ settles. NVIDIA doesn't document this; measured on an RTX 5090 under sustained l
 `GpuTuning.BuildCurvePlan` therefore writes the cap→flat segment as a straight line through
 (settle voltage, requested clock) with a fixed 16 MHz rise: the smallest the driver keeps, and a
 bound on the realized miss at half of it, with the post-write refinement absorbing the bin
-rounding. On a 10 mV gap this operates the card 5 mV above the
-named cap (`--mv 900` runs at 905 mV); keeping the voltage at or under the cap would cost a
-stock-slope step of clock, the worse side of the trade.
+rounding. On a 10 mV gap this operates the card 5 mV above the named cap (`--mv 900` runs at
+905 mV); keeping the voltage at or under the cap would cost a stock-slope step of clock, the
+worse side of the trade.
 
 ## Generations
 

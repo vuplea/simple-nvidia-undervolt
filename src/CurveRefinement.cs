@@ -8,22 +8,38 @@ namespace SimpleNvidiaUndervolt;
 /// rounding, but it is deterministic at a fixed thermal state and readable back in milliseconds,
 /// so the exact write is found by probing: when the plan's own write misses its operating point,
 /// nearby (cap, flat) pairs are written and judged against their read-backs, keeping the best
-/// realization — measured, never modeled, so it carries no constants from any one card. The
-/// budget is small and the values move by less than a bin, and a probe sequence that never lands
-/// keeps the closest attempt: the refinement can only improve on the plan's write, and the
-/// realized point is reported from the final read-back either way. What it cannot beat is the
-/// thermal slice: anchors step with temperature, so a point landed at apply time can still sit a
-/// step away at operating temperature — physics the report's notes carry, not error.
+/// realization. The candidate heuristics are tuned on measured hardware, but correctness never
+/// rests on them: every pair is judged by its own read-back, every pair stays within
+/// <see cref="MaxCapAdjustMhz"/>/<see cref="MinRiseMhz"/>..<see cref="MaxRiseMhz"/> of the plan's
+/// shape, and a probe sequence that never lands keeps the closest attempt — the refinement can
+/// only improve on the plan's write, and the realized point is reported from the final read-back
+/// either way. What it cannot beat is the thermal slice: anchors step with temperature, so a
+/// point landed at apply time can still sit a step away at operating temperature — physics the
+/// report's notes carry, not error.
 /// </summary>
 internal static class CurveRefinement
 {
-    /// <summary>Extra writes the probing may spend after the plan's own. The measured cases
-    /// converge in one or two; the budget covers a full bin of flat values either way.</summary>
+    /// <summary>Extra writes the probing may spend after the plan's own — the measured cases
+    /// converge in one or two — plus at most one landing re-write when the best pair isn't the
+    /// last one probed.</summary>
     internal const int MaxExtraWrites = 8;
 
     /// <summary>The clock slack an on-target realization may keep: half a read-back bin — the
     /// resolution the effective curve reports at, so probing below it chases noise.</summary>
     internal const int ClockToleranceMhz = 4;
+
+    /// <summary>How far a probed cap may sit from the plan's (MHz): about a bin — the refinement
+    /// absorbs bin rounding, so a candidate further out is chasing something else.</summary>
+    internal const int MaxCapAdjustMhz = 8;
+
+    /// <summary>The written cap→flat rise a probe may carry (MHz). Below the minimum the pair
+    /// measurably folds into one plateau and drops the settle a step (see
+    /// <c>GpuTuning.FlatSpreadMhz</c>); above the maximum the probe has left the plan's shape.
+    /// The bounds also keep every write the probing can produce inside the shape the e2e suite
+    /// asserts.</summary>
+    internal const int MinRiseMhz = 8;
+
+    internal const int MaxRiseMhz = 24;
 
     /// <summary>What the refinement left on the card: the deltas the final write holds (also
     /// copied into the plan's array by <see cref="GpuTuning.Apply"/>), the settle point of the
@@ -37,10 +53,10 @@ internal static class CurveRefinement
     /// point misses the plan's, probes alternative (cap, flat) pairs through
     /// <paramref name="apply"/> — which writes a delta array and returns the effective read-back.
     /// Candidates come from the read-back itself (the flat re-aimed at the value its first anchor
-    /// realized, the cap re-centered to keep the settle clock) with a small scan as fallback.
-    /// Ends on the best-scoring pair, re-applied if a later probe overwrote it; the outcome's
-    /// realization is always the final read-back's, so a thermal step between probes can't leave
-    /// a stale claim behind.
+    /// realized, the cap re-centered to keep the settle clock) with an alternating scan around
+    /// the plan's flat as fallback. Ends on the best-scoring pair, re-applied if a later probe
+    /// overwrote it; the outcome's realization is always the final read-back's, so a thermal step
+    /// between probes can't leave a stale claim behind.
     /// </summary>
     public static Outcome Refine(Func<int[], IReadOnlyList<(int Mv, int Mhz)>> apply,
         IReadOnlyList<(int Mv, int Mhz)> stock, GpuTuning.CurvePlan plan,
@@ -66,7 +82,8 @@ internal static class CurveRefinement
                 break;
             }
 
-            if (v <= c || !tried.Add((c, v)))
+            if (v - c < MinRiseMhz || v - c > MaxRiseMhz
+                || Math.Abs(c - plan.CapMhz) > MaxCapAdjustMhz || !tried.Add((c, v)))
             {
                 continue;
             }
@@ -118,8 +135,10 @@ internal static class CurveRefinement
 
     /// <summary>The probe sequence: first the pairs the read-back suggests — the flat re-aimed at
     /// the value its first anchor realized (the read-back is the local bin grid), with the cap
-    /// kept, re-centered so the settle-point clock stays on the request, and dropped a step — then
-    /// a flat-value scan around the plan's own, downward through one bin and one step up.</summary>
+    /// kept, re-centered so the settle-point clock stays on the request, and dropped a step —
+    /// then a flat-value scan alternating around the plan's own before walking deeper down: the
+    /// driver rounds both ways, and a budget spent all downward would never reach an upward
+    /// landing. The consuming loop's shape bounds filter what a distorted read-back suggests.</summary>
     private static IEnumerable<(int C, int V)> Candidates(GpuTuning.CurvePlan plan,
         IReadOnlyList<(int Mv, int Mhz)> planReadBack)
     {
@@ -127,17 +146,27 @@ internal static class CurveRefinement
         {
             int vr = flatRead.Mhz;
             yield return (plan.CapMhz, vr);
-            yield return (2 * plan.SettleMhz - vr, vr);
+            yield return (RecenteredCap(plan, vr), vr);
             yield return (plan.CapMhz - 4, vr - 8);
         }
 
-        for (int d = 1; d <= 6; d++)
+        foreach (int d in new[] { -1, +1, -2, +2, -3, -4, -5, -6 })
         {
-            yield return (plan.CapMhz, plan.FlatMhz - d);
+            yield return (plan.CapMhz, plan.FlatMhz + d);
         }
+    }
 
-        yield return (plan.CapMhz, plan.FlatMhz + 1);
-        yield return (plan.CapMhz, plan.FlatMhz + 2);
+    /// <summary>The cap that keeps the settle-point clock on the plan's request when the flat is
+    /// re-aimed at <paramref name="vr"/>. The settle sits <c>t</c> of the way into the cap→flat
+    /// gap (the plan's own geometry, not a fixed fraction — anchor gaps vary within one curve),
+    /// so the segment through (settle, request) solves to <c>(S − t·vr) / (1 − t)</c>; at
+    /// <c>t = 0</c> — a gap of one boost step or same-mV anchors — the settle sits on the cap
+    /// anchor and the cap is the requested clock itself.</summary>
+    private static int RecenteredCap(GpuTuning.CurvePlan plan, int vr)
+    {
+        double t = plan.FlatMv == plan.CapMv ? 0
+            : (double)(plan.SettleMv - plan.CapMv) / (plan.FlatMv - plan.CapMv);
+        return t == 0 ? plan.SettleMhz : (int)Math.Round((plan.SettleMhz - t * vr) / (1 - t));
     }
 
     /// <summary>The delta array for a probed (cap, flat) pair — the plan's own shape

@@ -97,16 +97,18 @@ public sealed class LoadTests : IClassFixture<GpuLoadFixture>
     /// actually holds: no lower than the cap point (a flatten-at-the-cap shape settles one step
     /// BELOW the cap, which is what the lower bound exists to catch) and no higher than one boost
     /// step below the effective top plateau's first anchor. The upper bound comes from the
-    /// read-back rather than the written shape because the driver can round the written flat's
-    /// tail a bin up, moving the plateau — and the settle — one or more anchors above the written
-    /// flat start (the post-apply report carries a note when it does). The clock assertion beside
-    /// each call bounds the plateau's height, so a wrong written shape can't vouch for itself
-    /// through its own wrong plateau.</summary>
+    /// read-back rather than the written shape because anchors step with temperature between the
+    /// apply and the loaded settle, moving the plateau — and the settle — a step or two up (the
+    /// post-apply report carries a note when the write itself staircased). The plateau inference
+    /// can walk far up a tilted read, so the ceiling is also clamped absolutely at three anchors
+    /// above the cap — beyond every step measured — keeping the bound real; the clock assertion
+    /// beside each call bounds the plateau's height the rest of the way.</summary>
     private void AssertSettledOnTheEffectiveCap(IReadOnlyList<(int Mv, int Mhz)> stock, int k, int settleMv)
     {
         (int Mv, int Mhz)? point = GpuTuning.EffectiveOperatingPoint(NvApi.GetVfCurve(_gpu.Gpu));
         Skip.If(point is null, "the effective curve didn't read back cleanly - retry.");
-        Assert.InRange(settleMv, stock[k].Mv - 2, point!.Value.Mv + 2);
+        int ceilingMv = Math.Min(point!.Value.Mv, stock[Math.Min(k + 3, stock.Count - 1)].Mv);
+        Assert.InRange(settleMv, stock[k].Mv - 2, ceilingMv + 2);
     }
 
     /// <summary>The point the boost settled on: after a warm-up pause, samples the live telemetry

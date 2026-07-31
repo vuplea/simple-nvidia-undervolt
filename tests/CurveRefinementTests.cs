@@ -104,6 +104,21 @@ public class CurveRefinementTests
     }
 
     [Fact]
+    public void UpwardOnlyLanding_IsReachedWithinTheBudget()
+    {
+        // A driver that realizes the flat uniformly only at one value above the plan's: the
+        // targeted candidates all fall outside the shape bounds and the scan must reach the
+        // upward value before the budget runs out - the alternating order exists for this.
+        var (stock, plan) = PlanFixture();
+        var driver = Driver(stock, (i, w) => w == 2504 ? w : i <= 12 ? 2488 : 2504);
+
+        var outcome = CurveRefinement.Refine(driver, stock, plan, driver(plan.DeltasKhz));
+
+        Assert.True(outcome.OnTarget);
+        Assert.InRange(outcome.ExtraWrites, 1, 4);
+    }
+
+    [Fact]
     public void UnreadableFirstReadBack_StillConvergesFromTheScan()
     {
         // A transitional first read gives the targeted candidates nothing to aim with (its

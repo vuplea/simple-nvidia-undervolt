@@ -41,9 +41,14 @@ public sealed class TuningShapeTests
         long capAnchorKhz = stock[k].Mhz * 1000L + deltas[k];
         long flatTopKhz = stock[k + 1].Mhz * 1000L + deltas[k + 1];
         Assert.InRange(flatTopKhz - capAnchorKhz, 8_000, 24_000);
+        // The written flat is exactly level relative to the curve the plan was built from; this
+        // measures it against a fresh live read, and anchors step individually by a bin with
+        // temperature between the two reads (see DEVELOPMENT.md), so each anchor gets one bin of
+        // slack. A stock-slope-continued shape still fails - its clocks keep climbing across the
+        // whole flat.
         for (int i = k + 2; i < deltas.Length; i++)
         {
-            Assert.Equal(flatTopKhz, stock[i].Mhz * 1000L + deltas[i]);
+            Assert.InRange(stock[i].Mhz * 1000L + deltas[i], flatTopKhz - 8_000, flatTopKhz + 8_000);
         }
 
         Assert.True(deltas[^1] < -15_000,
@@ -110,8 +115,8 @@ public sealed class TuningShapeTests
         // against the read-back until the realized point is the plan's settle (one boost step
         // below the flat start, floored at the cap), so a same-power-state status read moments
         // later reports that point - one boost step of slack each way covers an anchor stepping
-        // with temperature between the two reads, and a refinement that ran out of probes on a
-        // knife-edge write. The settle-law physics itself is LoadTests' subject.
+        // with temperature between the two reads. A kept-closest refinement whose miss exceeds a
+        // step fails here by design. The settle-law physics itself is LoadTests' subject.
         Assert.Equal(0, exitCode);
         Match m = Regex.Match(output, @"operating point (\d+) mV");
         Assert.True(m.Success, $"no 'operating point' report in: {output}");

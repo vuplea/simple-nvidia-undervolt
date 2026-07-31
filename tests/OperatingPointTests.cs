@@ -149,6 +149,21 @@ public class OperatingPointTests
     }
 
     [Fact]
+    public void SnapNote_IsSilentOnASingleElevatedTopAnchor()
+    {
+        // One bin of noise on the curve's last anchor is not a plateau - nothing pins the boost
+        // under a single anchor, so a note naming a near-peak settle would fabricate a number
+        // (the same rule EffectiveOperatingPoint's single-anchor-top refusal encodes).
+        var stock = TestCurves.Realistic();
+        var plan = GpuTuning.BuildCurvePlan(stock, capMv: 1000, targetMhz: null, capPoints: 8);
+        var effective = TestCurves.Effective(stock, plan.DeltasKhz);
+        effective[^1] = (effective[^1].Mv, effective[^1].Mhz + 8);
+
+        Assert.Equal(string.Empty,
+            GpuTuning.SnapNote(effective, (plan.FlatMv, plan.FlatMhz)));
+    }
+
+    [Fact]
     public void SnapNote_IsSilentOnSubBinWobble()
     {
         // A tail reading a few MHz above the flat start is read-back noise, not a split plateau.
@@ -159,6 +174,30 @@ public class OperatingPointTests
 
         Assert.Equal(string.Empty,
             GpuTuning.SnapNote(effective, (plan.FlatMv, plan.FlatMhz)));
+    }
+
+    // --- the post-apply realized-point report (GpuTuning.DescribeRealizedOperatingPoint) ---
+
+    [Fact]
+    public void RealizedReport_OffTargetFromReference_OnlyClaimsExactOffsetsWhenUnrefined()
+    {
+        // The thermal-shift note names the reference as the cause; whether the written offset
+        // still matches the reference exactly depends on whether the refinement adjusted it, and
+        // the report must not claim an exactness the write no longer has.
+        var stock = TestCurves.Realistic();
+        var plan = GpuTuning.BuildCurvePlan(stock, capMv: 1000, targetMhz: 2600, capPoints: 8);
+        var effective = TestCurves.Effective(stock, plan.DeltasKhz)
+            .Select(p => (p.Mv, p.Mhz - 30)).ToList();   // the live curve a thermal shift moved
+
+        string unrefined = GpuTuning.DescribeRealizedOperatingPoint(effective, plan,
+            targetMhz: 2600, GpuTuning.WriteVerification.Confirmed, planFromReference: true)[0];
+        string refined = GpuTuning.DescribeRealizedOperatingPoint(effective, plan,
+            targetMhz: 2600, GpuTuning.WriteVerification.Confirmed, planFromReference: true,
+            refined: true)[0];
+
+        Assert.Contains("matches the reference exactly", unrefined);
+        Assert.Contains("within a bin of the reference", refined);
+        Assert.DoesNotContain("matches the reference exactly", refined);
     }
 
     // --- status rendering (TuningSnapshot.DescribeCoreCurve) ---

@@ -305,9 +305,11 @@ internal static class GpuTuning
     /// <paramref name="referenceBaseline"/> marks a run whose plan came from the saved reference
     /// curve, and carries the live stock curve the reset exposed: the plan's own frequencies were
     /// measured at the reference's temperature, so both the verification and the realized-cap report
-    /// judge against this baseline instead — and the refinement, whose probes stay within a bin of
-    /// the plan, removes the rounding error while leaving the reference's thermal shift to the
-    /// report's own note.
+    /// judge against this baseline instead. The refinement stays within a bin of the plan: it
+    /// absorbs the bin rounding measured against the live read, cannot chase a larger
+    /// reference-to-live thermal shift (that stays with the report's note), and its sub-bin
+    /// adjustment — made at this run's thermal slice — is what persistence stores and the logon
+    /// replay reproduces.
     /// </summary>
     public static IReadOnlyList<string> Apply(IntPtr gpu, CurvePlan plan,
         IReadOnlyList<(int Mv, int Mhz)> planStock, int? targetMhz, int? memoryDeltaKhz,
@@ -328,13 +330,14 @@ internal static class GpuTuning
             // confirmation instead of probing blind.
             if (plan.FlatMhz >= NvApi.MinBoostClockKhz / 1000)
             {
+                IReadOnlyList<(int Mv, int Mhz)> planReadBack = ReadUntilFreqsReadable(gpu);
                 refined = CurveRefinement.Refine(
                     probe =>
                     {
                         NvApi.SetCurveFreqDeltasKhz(gpu, probe);
                         return ReadUntilFreqsReadable(gpu);
                     },
-                    planStock, plan, ReadUntilFreqsReadable(gpu));
+                    planStock, plan, planReadBack);
             }
         }
         catch
@@ -351,21 +354,20 @@ internal static class GpuTuning
             Array.Copy(refined.DeltasKhz, plan.DeltasKhz, plan.DeltasKhz.Length);
         }
 
-        IReadOnlyList<string> log = ConfirmWrite(gpu, plan, targetMhz, referenceBaseline);
-        return refined is { ExtraWrites: > 0 } r
-            ? new List<string> { DescribeRefinement(r) }.Concat(log).ToList()
-            : log;
+        IReadOnlyList<string> log = ConfirmWrite(gpu, plan, targetMhz, referenceBaseline,
+            refined is { ExtraWrites: > 0 });
+        return refined is { ExtraWrites: > 0 } r ? [DescribeRefinement(r), .. log] : log;
     }
 
     /// <summary>The one-line account of a refinement that adjusted the write. A probe sequence
-    /// that never landed still kept the closest realization, and the confirmation line that
-    /// follows carries the point actually realized — this line only says why the written values
-    /// differ from the plan's.</summary>
+    /// that never landed still kept the closest realization — named here, since the confirmation
+    /// line that follows re-reads and can say less on an unclean read.</summary>
     private static string DescribeRefinement(CurveRefinement.Outcome refined) => refined.OnTarget
         ? $"Refined the curve write against its read-back ({refined.ExtraWrites} extra write(s)) - "
           + "the driver's bin rounding had moved the operating point."
         : $"Probed {refined.ExtraWrites} adjusted curve write(s); none landed the planned operating "
-          + "point exactly, so the closest kept.";
+          + "point exactly - kept the closest"
+          + (refined.Realized is { } p ? $" ({p.Mv} mV / ~{p.Mhz} MHz)." : ".");
 
     /// <summary>
     /// Writes a tuning document's offsets onto a fresh stock reset. There is no plan to build: the
@@ -505,7 +507,9 @@ internal static class GpuTuning
     /// the deltas the card ends up with: <see cref="Apply"/> updates the array in place when the
     /// refinement lands on an adjusted pair, so persistence and exports store the write that
     /// actually happened. <see cref="Changes"/> and the clock fields stay as planned — the
-    /// refinement moves values by less than a bin, inside every judgment made from them.</summary>
+    /// refinement moves the written pair by at most a bin, while the reductions the write
+    /// verification judges from <see cref="Changes"/> span hundreds of MHz, far beyond its
+    /// reach.</summary>
     internal sealed record CurvePlan(int SettleMv, int SettleMhz, int CapMv, int CapMhz,
         int FlatMv, int FlatMhz, IReadOnlyList<CurveChange> Changes, int[] DeltasKhz,
         int CapIndex, int CapPoints);
@@ -843,13 +847,13 @@ internal static class GpuTuning
     /// isn't there; a read we simply couldn't take is reported but not treated as failure.
     /// </summary>
     private static IReadOnlyList<string> ConfirmWrite(IntPtr gpu, CurvePlan plan, int? targetMhz,
-        IReadOnlyList<(int Mv, int Mhz)>? referenceBaseline)
+        IReadOnlyList<(int Mv, int Mhz)>? referenceBaseline, bool refined = false)
         // A curve legitimately flattened below the boost floor can never read clean, so it takes one
         // read straight to the no-verdict path instead of waiting out the full poll window.
         => ConfirmWrite(gpu, plan.Changes,
             pollForReadable: plan.FlatMhz >= NvApi.MinBoostClockKhz / 1000, referenceBaseline,
             (verdict, effective) => DescribeRealizedOperatingPoint(effective, plan, targetMhz, verdict,
-                planFromReference: referenceBaseline is not null));
+                planFromReference: referenceBaseline is not null, refined));
 
     /// <summary>The confirmation skeleton the planned and replay writes share: read the effective
     /// curve back, judge whether the write reached it, revert-and-throw on a proven miss, and hand
@@ -1174,8 +1178,11 @@ internal static class GpuTuning
             return string.Empty;
         }
 
+        // A top of a single anchor is no plateau - one bin of noise on the curve's last anchor
+        // would otherwise fabricate a near-peak settle, the exact inference EffectiveOperatingPoint
+        // refuses for the same reason.
         int top = FlatStartIndex(effective);
-        if (top <= 0 || effective[top].Mv <= flat.Mv)
+        if (top <= 0 || top == effective.Count - 1 || effective[top].Mv <= flat.Mv)
         {
             return string.Empty;
         }
@@ -1215,9 +1222,9 @@ internal static class GpuTuning
     /// plan built from the saved reference curve intentionally reads back shifted by the live
     /// curve's thermal offset from the reference, so its note names that instead of a smoothing
     /// failure.</summary>
-    private static IReadOnlyList<string> DescribeRealizedOperatingPoint(
+    internal static IReadOnlyList<string> DescribeRealizedOperatingPoint(
         IReadOnlyList<(int Mv, int Mhz)> effective, CurvePlan plan, int? targetMhz,
-        WriteVerification verdict, bool planFromReference)
+        WriteVerification verdict, bool planFromReference, bool refined = false)
     {
         // The verdict on the write is already in (see ConfirmWrite); this reports the realized clock,
         // which lives in the live frequency column. If that column reads collapsed (usually a power-state
@@ -1250,8 +1257,11 @@ internal static class GpuTuning
             else if (Math.Abs(realizedMhz - plan.SettleMhz) > CurveBinMhz)
             {
                 line += planFromReference
-                    ? $" - off the {f} MHz target at the current temperature (the written offset "
-                      + "matches the reference exactly)"
+                    ? refined
+                        ? $" - off the {f} MHz target at the current temperature (the refined "
+                          + "write sits within a bin of the reference's)"
+                        : $" - off the {f} MHz target at the current temperature (the written "
+                          + "offset matches the reference exactly)"
                     : $" - target {f} not reached (driver smoothed the flatten)";
             }
         }
