@@ -51,9 +51,15 @@ internal sealed class TuneRequest
     /// <summary>Core frequency target at the cap voltage (optional).</summary>
     public ValueSpec Mhz { get; private init; }
 
-    /// <summary>Memory clock target (optional; works alone too). Offset/percentage are relative to
+    /// <summary>The memory clock target (optional; works alone too). Offset/percentage are relative to
     /// the factory base memory clock (a static value), so the memory write needs no curve read.</summary>
     public ValueSpec Mem { get; private init; }
+
+    /// <summary>A global core clock offset in MHz, applied to the P0 graphics clock delta
+    /// independently of the curve cap — like Afterburner's core clock slider. No reference
+    /// is needed: the driver adds this delta to every boost point, so only an absolute MHz
+    /// value makes sense (a percentage has no stable base across all voltages).</summary>
+    public int? CoreOffsetMhz { get; private init; }
 
     /// <summary>Reference peak voltage under load, required only for the offset/percentage forms.</summary>
     public double? PeakMv { get; private init; }
@@ -114,6 +120,7 @@ internal sealed class TuneRequest
             "--mv", "--mv-offset", "--mv-pct",
             "--mhz", "--mhz-offset", "--mhz-pct",
             "--mem", "--mem-offset", "--mem-pct",
+            "--core-offset",
             "--peak-mv", "--cap-points", "--in-tuning-file", "--out-tuning-file")
         .WithOptionalValue("--save-shortcut");
 
@@ -126,6 +133,7 @@ internal sealed class TuneRequest
             Mv = Spec(parsed, "--mv"),
             Mhz = Spec(parsed, "--mhz"),
             Mem = Spec(parsed, "--mem"),
+            CoreOffsetMhz = parsed.Integer("--core-offset"),
             PeakMv = parsed.Number("--peak-mv"),
             CapPoints = parsed.Integer("--cap-points") ?? DefaultCapPoints,
             InTuningFile = parsed.FilePath("--in-tuning-file"),
@@ -153,7 +161,8 @@ internal sealed class TuneRequest
             }
 
             string replayFlag = request.InTuningFile is not null ? "--in-tuning-file" : "--apply-persisted";
-            if (request.Mv.IsSet || request.Mhz.IsSet || request.Mem.IsSet || request.PeakMv is not null
+            if (request.Mv.IsSet || request.Mhz.IsSet || request.Mem.IsSet || request.CoreOffsetMhz is not null
+                || request.PeakMv is not null
                 || parsed.Has("--cap-points"))
             {
                 throw new CliError($"{replayFlag} re-applies the exported tuning exactly - "
@@ -169,10 +178,11 @@ internal sealed class TuneRequest
             return request;
         }
 
-        if (!request.Mv.IsSet && !request.Mem.IsSet)
+        if (!request.Mv.IsSet && !request.Mem.IsSet && request.CoreOffsetMhz is null)
         {
-            throw new CliError("tune needs a voltage cap (--mv/--mv-offset/--mv-pct) "
-                               + "and/or a memory clock (--mem/--mem-offset/--mem-pct).");
+            throw new CliError("tune needs a voltage cap (--mv/--mv-offset/--mv-pct), "
+                               + "a memory clock (--mem/--mem-offset/--mem-pct), "
+                               + "and/or a core clock offset (--core-offset).");
         }
 
         // The core clock is set at the cap voltage, so it can't stand alone.
@@ -326,6 +336,7 @@ internal sealed class TuneRequest
         AddSpec(args, "--mv", Mv);
         AddSpec(args, "--mhz", Mhz);
         AddSpec(args, "--mem", Mem);
+        AddNumber(args, "--core-offset", CoreOffsetMhz);
         AddNumber(args, "--peak-mv", PeakMv);
         AddCapPoints(args);
         args.AddRange(Gpu.ToArgs());

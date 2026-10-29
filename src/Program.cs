@@ -393,6 +393,7 @@ internal static class Cli
         Console.WriteLine(gpu.Label);
         Console.WriteLine($"  Core curve offset: {tuning.DescribeCoreCurve()}");
         Console.WriteLine($"  Memory clock: {tuning.DescribeMemoryClock()}");
+        Console.WriteLine($"  Core clock offset: {tuning.DescribeCoreClockOffset()}");
         Console.WriteLine($"  Core voltage boost: {tuning.DescribeVoltageBoost()}");
         Console.WriteLine($"  Reference curve: {ReferenceCurve.DescribeForStatus(gpu)}");
         Console.WriteLine($"  Re-applies at logon: {startupTask.Result}");
@@ -695,6 +696,11 @@ internal static class Cli
             Console.WriteLine($"  Memory: {TuningSnapshot.DescribeMemoryClock(memMhz, baseMemMhz)}");
         }
 
+        if (request.CoreOffsetMhz is { } coreOffset)
+        {
+            Console.WriteLine($"  Core: {coreOffset:+0;-0} MHz offset");
+        }
+
         // A real run resets to stock then writes memory-then-curve inside Apply (the order the driver
         // requires) - or, with no cap requested, just the memory offset onto the fresh reset. A dry
         // run only describes the change.
@@ -702,13 +708,21 @@ internal static class Cli
         {
             PrintIndented(request.DryRun
                 ? GpuTuning.DescribePlan(plan, targetMhz)
-                : GpuTuning.Apply(gpu.Handle, plan, planStock!, targetMhz, memory?.DeltaKhz, referenceBaseline));
+                : GpuTuning.Apply(gpu.Handle, plan, planStock!, targetMhz, memory?.DeltaKhz,
+                    request.CoreOffsetMhz ?? 0, referenceBaseline));
         }
         else if (memory is { } mem)
         {
             PrintIndented(request.DryRun
                 ? new[] { $"[dry run] Would reset to stock and set the memory clock to {mem.TargetMhz} MHz." }
-                : GpuTuning.ApplyMemoryOnly(gpu.Handle, mem.DeltaKhz));
+                : GpuTuning.ApplyMemoryOnly(gpu.Handle, mem.DeltaKhz, request.CoreOffsetMhz ?? 0));
+        }
+        else if (request.CoreOffsetMhz is { } coreOffMhz)
+        {
+            // Core offset only — no curve cap, no memory. Reset to stock then write just the offset.
+            PrintIndented(request.DryRun
+                ? new[] { $"[dry run] Would reset to stock and set the core clock offset to {coreOffMhz:+0;-0} MHz." }
+                : GpuTuning.ApplyCoreOffsetOnly(gpu.Handle, coreOffMhz));
         }
 
         // Save the shortcut only now the request has resolved and validated (and, on a real run, the
@@ -742,7 +756,8 @@ internal static class Cli
         TuningDoc? runDoc = null;
         TuningDoc RunDoc() => runDoc ??= TuningDocuments.MakeTuningDoc(GpuIdentity.Read(gpu.Handle),
             planStock ?? Array.Empty<(int Mv, int Mhz)>(),
-            new AppliedTuning(plan?.DeltasKhz ?? Array.Empty<int>(), memory?.DeltaKhz ?? 0));
+            new AppliedTuning(plan?.DeltasKhz ?? Array.Empty<int>(), memory?.DeltaKhz ?? 0,
+                request.CoreOffsetMhz ?? 0));
 
         if (request.DryRun)
         {
@@ -943,12 +958,12 @@ internal static class Cli
             Usage: simple-nvidia-undervolt [command] [options]
 
             [options]             By not specifying a verb, it is implicitly a 'tune' command: you can
-                                  cap voltage (flatten the curve), set the clock at the cap, and offset
-                                  the memory clock.
+                                  cap voltage (flatten the curve), set the clock at the cap, offset
+                                  the memory clock, or apply a global core clock offset.
             install               Copy the app to Program Files and add it to the system PATH, so
                                   shortcuts work and new terminals can run the command. (A persisting
                                   tune installs the copy too; this is the standalone form.)
-            status                Show curve offset, memory clock, voltage boost, and logon re-apply.
+            status                Show curve offset, core clock offset, memory clock, voltage boost, and logon re-apply.
                                   --out-tuning-file <f> exports the applied tuning as JSON - the
                                   tuned curve anchors, keyed by voltage, plus the memory offset -
                                   re-appliable with 'tune --in-tuning-file'.
@@ -982,7 +997,9 @@ internal static class Cli
               --mem <n>         n MHz.
               --mem-offset <n>  base_MHz + n.
               --mem-pct <n>     base_MHz * (1 + n/100).
-            Other:
+            Core clock offset (optional, works alone or with other options):
+              --core-offset <n> Global MHz offset applied to the P0 graphics clock, like Afterburner's
+                                core clock slider.
               --cap-points <n>  Curve anchors holding the cap's offset, counting down from the cap.
                                 1 = only the cap point (default 25).
               --in-tuning-file <f>

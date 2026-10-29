@@ -93,6 +93,9 @@ internal sealed class TuningDoc
     /// <summary>The memory clock offset from the factory base, MHz.</summary>
     public int MemoryOffset { get; set; }
 
+    /// <summary>The global core clock offset applied to the P0 graphics clock delta, MHz.</summary>
+    public int CoreOffsetMhz { get; set; }
+
     /// <summary>The tuned range of anchors, ascending in voltage: from the first tuned anchor to
     /// the last, untouched interior anchors riding along at offset 0 (see
     /// <see cref="TuningDocuments.MakeTuningDoc"/>). Declared (and so serialized) last: the long
@@ -259,6 +262,7 @@ internal static class TuningDocuments
             GpuPciIds = gpu.PciIds,
             Curve = entries.ToArray(),
             MemoryOffset = (int)Math.Round(tuning.MemoryDeltaKhz / 1000.0),
+            CoreOffsetMhz = tuning.CoreDeltaKhz / 1000,
         };
     }
 

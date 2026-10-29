@@ -313,11 +313,17 @@ internal static class GpuTuning
     /// </summary>
     public static IReadOnlyList<string> Apply(IntPtr gpu, CurvePlan plan,
         IReadOnlyList<(int Mv, int Mhz)> planStock, int? targetMhz, int? memoryDeltaKhz,
-        IReadOnlyList<(int Mv, int Mhz)>? referenceBaseline = null)
+        int coreDeltaKhz = 0, IReadOnlyList<(int Mv, int Mhz)>? referenceBaseline = null)
     {
         if (memoryDeltaKhz is { } delta)
         {
-            NvApi.SetPstate0Offsets(gpu, graphicsDeltaKhz: 0, memoryDeltaKhz: delta, coreVoltageDeltaUv: 0);
+            NvApi.SetPstate0Offsets(gpu, graphicsDeltaKhz: coreDeltaKhz * 1000,
+                memoryDeltaKhz: delta, coreVoltageDeltaUv: 0);
+        }
+        else if (coreDeltaKhz != 0)
+        {
+            NvApi.SetPstate0Offsets(gpu, graphicsDeltaKhz: coreDeltaKhz * 1000, memoryDeltaKhz: 0,
+                coreVoltageDeltaUv: 0);
         }
 
         CurveRefinement.Outcome? refined = null;
@@ -396,13 +402,13 @@ internal static class GpuTuning
 
         if (doc.Curve!.Length == 0)
         {
-            return ApplyMemoryOnly(gpu, doc.MemoryOffset * 1000);
+            return ApplyMemoryOnly(gpu, doc.MemoryOffset * 1000, doc.CoreOffsetMhz * 1000);
         }
 
         IReadOnlyList<(int Mv, int Mhz)> baseline = ResetAndReadVerificationBaseline(gpu);
         int[] deltasKhz = TuningDocuments.ResolveCurveOffsetsKhz(doc, baseline,
             () => referenceStock ?? baseline, what);
-        var tuning = new AppliedTuning(deltasKhz, doc.MemoryOffset * 1000);
+        var tuning = new AppliedTuning(deltasKhz, doc.MemoryOffset * 1000, doc.CoreOffsetMhz * 1000);
 
         try
         {
@@ -464,11 +470,29 @@ internal static class GpuTuning
     /// <summary>Writes a memory-only tuning: resets everything to stock first (a real run sets the
     /// whole tuning state, exactly like the curve path's reset), then writes the memory offset. The
     /// curve is never read beyond <see cref="Clear"/>'s own guard, so this works at any power state.</summary>
-    public static IReadOnlyList<string> ApplyMemoryOnly(IntPtr gpu, int memoryDeltaKhz)
+    public static IReadOnlyList<string> ApplyMemoryOnly(IntPtr gpu, int memoryDeltaKhz,
+        int coreDeltaKhz = 0)
     {
         var log = new List<string>(Clear(gpu));
-        NvApi.SetPstate0Offsets(gpu, graphicsDeltaKhz: 0, memoryDeltaKhz: memoryDeltaKhz, coreVoltageDeltaUv: 0);
+        NvApi.SetPstate0Offsets(gpu, graphicsDeltaKhz: coreDeltaKhz * 1000, memoryDeltaKhz: memoryDeltaKhz,
+            coreVoltageDeltaUv: 0);
+        if (coreDeltaKhz != 0)
+        {
+            log.Add($"Core clock offset: {coreDeltaKhz:+0;-0} MHz.");
+        }
         log.Add("Memory clock offset written.");
+        return log;
+    }
+
+    /// <summary>Writes a core-offset-only tuning: resets everything to stock, then writes just the
+    /// global core clock offset. Works at any power state — the reset is a stock write, and the
+    /// offset is a P0 delta with no curve read needed.</summary>
+    public static IReadOnlyList<string> ApplyCoreOffsetOnly(IntPtr gpu, int coreDeltaKhz)
+    {
+        var log = new List<string>(Clear(gpu));
+        NvApi.SetPstate0Offsets(gpu, graphicsDeltaKhz: coreDeltaKhz * 1000, memoryDeltaKhz: 0,
+            coreVoltageDeltaUv: 0);
+        log.Add($"Core clock offset: {coreDeltaKhz:+0;-0} MHz.");
         return log;
     }
 
