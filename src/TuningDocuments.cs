@@ -472,9 +472,6 @@ internal static class TuningDocuments
             // memory offset to the same standard). The offset alone is bounded first, so a
             // hand-edited value can't overflow the kHz arithmetic below.
             long resolvedMhz = anchors[i].Mhz + offsetMhz;
-
-            // A plan floors its cap band at anchor 0's clock (GpuTuning.CapShapeMhz), so a curve
-            // whose floor sits under the plausible minimum is held to that floor instead.
             int minMhz = Math.Min(TuneRequest.MinPlausibleCoreClockMhz, anchors[0].Mhz);
             bool resolvedImplausible = resolvedMhz > TuneRequest.MaxPlausibleCoreClockMhz
                                        || (resolvedMhz < minMhz && !GpuTuning.AtFloorClock(anchors, i));
