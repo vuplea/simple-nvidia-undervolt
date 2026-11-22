@@ -587,8 +587,6 @@ internal static class Cli
             Console.WriteLine($"  {warning}");
         }
 
-        Compat.RequireTrueClocks(doc.AppVersion, gpu.Handle, $"The curve file {inFile}");
-
         if (!ReferenceCurve.AnchorsMatch(points, NvApi.GetVfCurve(gpu.Handle)))
         {
             throw new CliError($"The curve file {inFile} doesn't match this GPU's curve anchors "
