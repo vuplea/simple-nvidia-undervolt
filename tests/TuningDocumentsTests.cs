@@ -438,6 +438,33 @@ public class TuningDocumentsTests
     }
 
     [Fact]
+    public void ExportedPlan_ResolvesWhenItsBandReachesAFloorBelowThePlausibleMinimum()
+    {
+        // A plan floors its cap band at anchor 0's clock, which on Pascal (139 MHz) sits under
+        // the 200 MHz minimum: the band's low anchors land between the two, on anchors whose
+        // own stock clocks read well above the floor.
+        var stock = TestCurves.LowFloor();
+        var plan = GpuTuning.BuildCurvePlan(stock, capMv: stock[10].Mv, targetMhz: 900, capPoints: 10);
+        Assert.Contains(plan.Changes, c => c.NewMhz == stock[0].Mhz);
+        TuningDoc doc = Tuning(stock, plan.DeltasKhz);
+
+        Assert.Equal(plan.DeltasKhz, Resolve(doc, stock));
+    }
+
+    [Fact]
+    public void ResolveCurveOffsets_RefusesAClockBelowAFloorUnderThePlausibleMinimum()
+    {
+        // The floor stands in for the minimum rather than removing it: no plan writes under it.
+        var stock = TestCurves.LowFloor();                   // anchor 3 = 439 MHz over a 139 floor
+        var doc = new TuningDoc
+        {
+            Curve = new[] { new CurveEntryDoc { Mv = stock[3].Mv, Offset = -301 } },
+        };
+
+        Assert.Throws<CliError>(() => Resolve(doc, stock));
+    }
+
+    [Fact]
     public void ResolveCurveOffsets_SkipsTheResolvedBoundOnAnUnreadableTable()
     {
         // A dry run can resolve against a transitional live table; the resolved-clock judgments

@@ -416,8 +416,10 @@ internal static class TuningDocuments
     /// and refused when the stock read backing it sits at the idle floor itself, where no offset
     /// can be derived (save a reference curve instead).
     /// Each resolved clock is held to the planned path's plausible range — a replay must not
-    /// write offsets no plan could have produced. The range's minimum is not enforced at anchors
-    /// reading at the curve's floor clock (<see cref="GpuTuning.AtFloorClock"/>): at deep idle —
+    /// write offsets no plan could have produced. The range's minimum follows the curve's floor
+    /// clock (anchor 0) where that is lower — a plan floors its cap band there
+    /// (<see cref="GpuTuning.CapShapeMhz"/>) — and is not enforced at anchors reading at that
+    /// floor (<see cref="GpuTuning.AtFloorClock"/>): at deep idle —
     /// the state the logon re-apply runs in — those anchors read an idle floor clock near the
     /// minimum instead of their stock clocks, so any negative offset there (an undervolt's cap
     /// band included) would resolve under it and refuse a document the planned path itself
@@ -470,16 +472,18 @@ internal static class TuningDocuments
             // memory offset to the same standard). The offset alone is bounded first, so a
             // hand-edited value can't overflow the kHz arithmetic below.
             long resolvedMhz = anchors[i].Mhz + offsetMhz;
+
+            // A plan floors its cap band at anchor 0's clock (GpuTuning.CapShapeMhz), so a curve
+            // whose floor sits under the plausible minimum is held to that floor instead.
+            int minMhz = Math.Min(TuneRequest.MinPlausibleCoreClockMhz, anchors[0].Mhz);
             bool resolvedImplausible = resolvedMhz > TuneRequest.MaxPlausibleCoreClockMhz
-                                       || (resolvedMhz < TuneRequest.MinPlausibleCoreClockMhz
-                                           && !GpuTuning.AtFloorClock(anchors, i));
+                                       || (resolvedMhz < minMhz && !GpuTuning.AtFloorClock(anchors, i));
             if (Math.Abs(offsetMhz) > TuneRequest.MaxPlausibleCoreClockMhz
                 || (freqsReadable && resolvedImplausible))
             {
                 throw new CliError($"{what} tunes the {entry.Mv} mV anchor by {offsetMhz:+0;-0} MHz "
                     + $"to ~{resolvedMhz} MHz - outside the plausible "
-                    + $"{TuneRequest.MinPlausibleCoreClockMhz}-{TuneRequest.MaxPlausibleCoreClockMhz} MHz "
-                    + "core-clock range.");
+                    + $"{minMhz}-{TuneRequest.MaxPlausibleCoreClockMhz} MHz core-clock range.");
             }
 
             deltasKhz[i] = (int)(offsetMhz * 1000);

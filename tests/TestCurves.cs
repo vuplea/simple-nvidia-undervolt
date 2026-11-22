@@ -27,6 +27,11 @@ internal static class TestCurves
         => Enumerable.Range(0, 20).Select(i => (800 + i * 20,
             i < pinned ? floorMhz : floorMhz + (i - pinned + 1) * 200)).ToList();
 
+    /// <summary>A readable curve with a Pascal-like floor: anchor 0 (139 MHz) sits under
+    /// <see cref="TuneRequest.MinPlausibleCoreClockMhz"/>, the rest rising 100 MHz per anchor.</summary>
+    public static List<(int Mv, int Mhz)> LowFloor()
+        => Enumerable.Range(0, 20).Select(i => (800 + i * 20, 139 + i * 100)).ToList();
+
     /// <summary>A very short curve — the shape <see cref="NvApi.GetVfCurve"/> returns when the status
     /// buffer offsets don't match the hardware, so it breaks out after only a few plausible-looking
     /// points. Too short to be a real V/F table.</summary>

@@ -236,9 +236,10 @@ internal sealed class TuneRequest
     /// <summary>The plausible core-clock range (MHz) resolved clocks are held to — a planned
     /// run's target and a replayed document's per-anchor resolution
     /// (<see cref="TuningDocuments.ResolveCurveOffsetsKhz"/>) alike, so a replay can't write a
-    /// clock no plan could have produced. One carve-out: a replay skips the minimum at anchors
-    /// reading at the curve's idle floor (<see cref="GpuTuning.AtFloorClock"/>), whose live
-    /// clock is a power state, not a stock clock to resolve against.</summary>
+    /// clock no plan could have produced. Two carve-outs, both on a replay's minimum: it follows
+    /// the curve's floor clock where that is lower (a plan floors its cap band there), and it is
+    /// skipped at anchors reading at the idle floor (<see cref="GpuTuning.AtFloorClock"/>),
+    /// whose live clock is a power state, not a stock clock to resolve against.</summary>
     internal const int MinPlausibleCoreClockMhz = 200;
 
     internal const int MaxPlausibleCoreClockMhz = 4000;
