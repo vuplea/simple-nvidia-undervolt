@@ -45,8 +45,9 @@ raw <hexId> <v> <sz> [mask] Dump the 32-bit words a GET writes.
 
 The curve lives in two index-aligned buffers: the **status** (`0x21537AD4` v1, 28-byte entries, freq
 +0x08 / volt +0x0C) holds the live effective curve; the **control** (`0x23F1B133` v1, 36-byte entries,
-signed kHz delta +0x18) holds the editable deltas. A control entry drives the next status anchor (so
+signed delta +0x18) holds the editable deltas. A control entry drives the next status anchor (so
 anchor `i` ← control `i-1`). The status freq column can collapse at idle, but the voltages stay valid.
+Both frequency fields are kHz, except on Pascal (see [Generations](#generations)).
 
 Requests for either buffer carry a bitmask (the words after the version) naming the point slots to
 fill, and the driver fails the whole call with `NVAPI_ERROR` when the mask names a slot the card
@@ -108,18 +109,16 @@ at all (their undervolting is BIOS-mod territory). A failed VF-point read is dia
 public `NvAPI_GPU_GetArchInfo` (`0xD8265D24`): pre-Pascal architectures get a "cannot be tuned"
 refusal by family name; Pascal-onward architectures get a stubbed-driver-interface message (seen on
 some laptop SKUs). Volta (Titan V) is untested but has the Boost 3.0 curve; the mask adapts to
-whatever slot layout it reports, while delta scaling stays off outside the Pascal band — a
-doubled-unit Volta would land at half depth, reported as such.
+whatever slot layout it reports, and its curve is read as plain kHz — a half-kHz Volta would show
+twice its real clocks in `curve`.
 
-The status curve's frequencies are plain kHz on every generation. The control table's delta field
-is **half-kHz units on Pascal** (write
-200000 to move an anchor 100 MHz) and plain kHz from Turing on. The unit is witnessed read-only via
-`0x64B43A6A` (ClkDomainsGetInfo, the scan's `clkDomainsInfo`): the graphics entry's delta range
-reads ±2,000,000 raw on Pascal and ±1,000,000 on plain-unit cards — both meaning the universal
-±1000 MHz offset limit. `NvApi` converts at the field only on the exact Pascal signature **and** a
-Pascal architecture id — the signature alone would also match a future plain-unit card that
-genuinely widens its limit to ±2000 MHz, and doubling there overshoots — so the rest of the code
-always works in true kHz.
+The curve's graphics frequencies — the status curve and the control table's deltas alike — are
+**half-kHz units on Pascal** (1873 MHz reads 3746000; write 200000 to move an anchor 100 MHz) and
+plain kHz from Turing on. No buffer states the unit: the delta range in `0x64B43A6A`
+(ClkDomainsGetInfo, the scan's `clkDomainsInfo`) is in the same unit, and the limit it encodes
+differs by generation, so it can't tell the two apart. `NvApi` therefore converts at the field on
+the Pascal architecture id (`0x130`), and the rest of the code always works in true kHz. The raw
+dumps (`raw`, `scan`, `diff`) show the fields as stored.
 
 ## Verify your card
 

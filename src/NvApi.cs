@@ -344,13 +344,13 @@ internal static class NvApi
     private const int CONTROL_TABLE_SIZE = 9248; // ClkVfPointsGetControl / SetControl, version 1
     public const int CtrlEntryBase = 0x64;
     public const int CtrlEntryStride = 36;
-    public const int CtrlDeltaOffset = 0x18; // signed kHz frequency delta within an entry
+    public const int CtrlDeltaOffset = 0x18; // signed frequency delta within an entry, in curve units
 
     private const int StatusCurveSize = 7208; // ClkVfPointsGetStatus, version 1
     public const int StatusEntryBase = 0x40;
     public const int StatusEntryStride = 28;
     public const int StatusTypeOffset = 0x04; // point domain: 0 = core, 1 = memory
-    public const int StatusFreqOffset = 0x08; // kHz
+    public const int StatusFreqOffset = 0x08; // curve units (see CurveUnitsPerKhz)
     public const int StatusVoltOffset = 0x0C; // uV
 
     // What a real V/F curve reads as - one physical judgment each, shared by the curve decode
@@ -395,8 +395,8 @@ internal static class NvApi
     internal const uint ARCHITECTURE_PASCAL = 0x130;
 
     /// <summary>The GPU's architecture id (NV_GPU_ARCHITECTURE_ID: 0x110 Maxwell, 0x130 Pascal,
-    /// 0x160 Turing, 0x1B0 Blackwell, ...), or null when the driver won't report it - this feeds an
-    /// error diagnosis, which the lookup's own failure must not displace.</summary>
+    /// 0x160 Turing, 0x1B0 Blackwell, ...), or null when the driver won't report it - it feeds an
+    /// error diagnosis and the curve unit, and the lookup's own failure must displace neither.</summary>
     private static uint? ArchitectureId(IntPtr gpu)
     {
         try
@@ -453,9 +453,12 @@ internal static class NvApi
     /// slot 80 on Pascal) end the walk outright, so one can't slip in as a curve anchor even with a
     /// voltage that happens to continue the ascent.</summary>
     public static IReadOnlyList<(int Mv, int Mhz)> GetVfCurve(IntPtr gpu)
-    {
-        byte[] bytes = ReadVfCurveStatusRaw(gpu);
+        => DecodeVfCurve(ReadVfCurveStatusRaw(gpu), CurveUnitsPerKhz(ArchitectureId(gpu)));
 
+    /// <summary>Decodes a status buffer whose frequencies count <paramref name="unitsPerKhz"/> to
+    /// the kHz (<see cref="CurveUnitsPerKhz"/>).</summary>
+    internal static IReadOnlyList<(int Mv, int Mhz)> DecodeVfCurve(byte[] bytes, int unitsPerKhz)
+    {
         var points = new List<(int Mv, int Mhz)>();
         int lastVoltUv = 0;
         for (int e = StatusEntryBase; e + StatusEntryStride <= bytes.Length; e += StatusEntryStride)
@@ -480,78 +483,25 @@ internal static class NvApi
             }
 
             lastVoltUv = volt;
-            points.Add((volt / 1000, Math.Max(0, freq) / 1000));
+            points.Add((volt / 1000, Math.Max(0, freq) / (1000 * unitsPerKhz)));
         }
 
         return points;
     }
 
-    // --- Control-table delta unit ---
+    // --- Curve frequency unit ---
     //
-    // The status curve's frequencies are plain kHz on every generation, but the control table's
-    // delta field is not: on Pascal it is in HALF-kHz units (a field value of 200000 moves the
-    // anchor by 100 MHz), while Turing and later use plain kHz. The unit is witnessed read-only
-    // through ClkDomainsGetInfo: the graphics domain's delta range reads +/-2,000,000 raw on Pascal
-    // and +/-1,000,000 on plain-unit cards, both meaning the universal +/-1000 MHz offset limit.
-    // The helpers below read/write true kHz and convert at the field, so nothing else in the
-    // codebase sees the unit. (Evidence: Demion/nvapioc and arcnmx/nvapi-rs, both Pascal-era;
-    // the +/-1,000,000 range and plain-kHz writes verified on a 5090.)
+    // Pascal counts the graphics curve in HALF-kHz units - the status frequencies and the control
+    // table's deltas alike (1873 MHz reads 3746000; a delta of 200000 moves an anchor 100 MHz) -
+    // while Turing and later use plain kHz. The curve helpers read/write true kHz and convert at
+    // the field, so nothing else in the codebase sees the unit.
 
-    private const int CLK_DOMAINS_SIZE = 2344; // ClkDomainsGetInfo, version 1
-    private const int DomainsEntryBase = 0x28;
-    private const int DomainsEntryStride = 72;
-    private const int DomainsTypeOffset = 0x04;     // public clock id: 0 = graphics, 4 = memory
-    private const int DomainsRangeMaxOffset = 0x28; // signed, in the control table's delta unit
-    private const int DomainsRangeMinOffset = 0x2C;
-
-    /// <summary>The graphics domain's frequency-delta range in raw (control-table) units, from a
-    /// ClkDomainsGetInfo buffer: the first graphics-typed entry with a populated range. Null when
-    /// none is - the buffer doesn't fit this layout, and no unit can be inferred from it.</summary>
-    internal static (int RawMax, int RawMin)? GraphicsDeltaRange(byte[] bytes)
-    {
-        for (int e = DomainsEntryBase; e + DomainsEntryStride <= bytes.Length; e += DomainsEntryStride)
-        {
-            int rawMax = BitConverter.ToInt32(bytes, e + DomainsRangeMaxOffset);
-            if (BitConverter.ToInt32(bytes, e + DomainsTypeOffset) == 0 && rawMax != 0)
-            {
-                return (rawMax, BitConverter.ToInt32(bytes, e + DomainsRangeMinOffset));
-            }
-        }
-
-        return null;
-    }
-
-    /// <summary>Raw field units per kHz for the control table's delta field: 2 only on the exact
-    /// Pascal signature (+/-2,000,000 raw for the +/-1000 MHz limit) on a Pascal-architecture card,
-    /// 1 otherwise. Both conditions are needed: the signature alone would also match a future
-    /// plain-unit card that genuinely widens its limit to +/-2000 MHz, and doubling there
-    /// overshoots the request. Everything else - Volta included (untested; deliberately outside the
-    /// band), and an unreadable architecture - deliberately reads as 1: unscaled deltas are the
-    /// safe miss, landing at half depth with the realized-cap report saying so.</summary>
-    internal static int CurveDeltaUnitScale((int RawMax, int RawMin)? graphicsRange, uint? architectureId)
-        => graphicsRange == (2_000_000, -2_000_000)
-           && architectureId is >= ARCHITECTURE_PASCAL and < ARCHITECTURE_VOLTA
-            ? 2
-            : 1;
-
-    /// <summary>NV_GPU_ARCHITECTURE_GV100 - Volta, the first id past the Pascal band.</summary>
-    internal const uint ARCHITECTURE_VOLTA = 0x140;
-
-    /// <summary>The card's control-table delta unit (see <see cref="CurveDeltaUnitScale"/>). A card
-    /// where the witness can't be read at all reads as plain units - the pre-witness behavior.</summary>
-    private static int GetCurveDeltaUnitScale(IntPtr gpu)
-    {
-        try
-        {
-            byte[] bytes = ReadRaw(gpu, ID_GPU_GetClkDomainsInfo, 1, CLK_DOMAINS_SIZE, CLK_DOMAINS_SIZE,
-                requestMaskWords: 0);
-            return CurveDeltaUnitScale(GraphicsDeltaRange(bytes), ArchitectureId(gpu));
-        }
-        catch (Exception)
-        {
-            return 1;
-        }
-    }
+    /// <summary>Raw field units per kHz for the curve's frequencies and deltas: 2 on Pascal, 1 on
+    /// everything else - Volta (untested) and an unreadable architecture included. The
+    /// architecture decides because no buffer states the unit: ClkDomainsGetInfo's delta range is
+    /// in the same unit, and the limit it encodes differs by generation.</summary>
+    internal static int CurveUnitsPerKhz(uint? architectureId)
+        => architectureId == ARCHITECTURE_PASCAL ? 2 : 1;
 
     // The control entry at index j drives the effective frequency of the NEXT curve anchor (status
     // index j+1) — an off-by-one verified empirically (poking control entry j moves status anchor
@@ -575,7 +525,7 @@ internal static class NvApi
     /// (the delta of anchor i is read from control entry i-1).</summary>
     public static int[] GetCurveFreqDeltasKhz(IntPtr gpu, int count)
     {
-        int scale = GetCurveDeltaUnitScale(gpu);
+        int scale = CurveUnitsPerKhz(ArchitectureId(gpu));
         byte[] bytes = ReadRaw(gpu, ID_GPU_GetClockBoostTable, 1, CONTROL_TABLE_SIZE, CONTROL_TABLE_SIZE,
             GetVfPointsMask(gpu));
 
@@ -601,7 +551,7 @@ internal static class NvApi
                 $"{deltasKhz.Length} curve deltas don't fit the {CONTROL_TABLE_SIZE}-byte control table.");
         }
 
-        int scale = GetCurveDeltaUnitScale(gpu);
+        int scale = CurveUnitsPerKhz(ArchitectureId(gpu));
         byte[] mask = GetVfPointsMask(gpu);
         IntPtr buffer = AllocZeroed(CONTROL_TABLE_SIZE);
         try
