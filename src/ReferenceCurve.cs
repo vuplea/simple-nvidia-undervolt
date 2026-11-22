@@ -82,7 +82,7 @@ internal static class ReferenceCurve
         Saved? saved;
         try
         {
-            saved = TryLoad(gpu.Index, out bool present);
+            saved = TryLoad(gpu, out bool present);
             if (saved is null)
             {
                 return (present ? State.Unreadable : State.None, null);
@@ -139,18 +139,18 @@ internal static class ReferenceCurve
     /// from saved-but-unusable data (a partial write, hand-edited values, another build's format):
     /// the parsed curve must also pass the same physical checks the tuning itself relies on, so
     /// file nonsense can't reach a curve plan.</summary>
-    private static Saved? TryLoad(int gpuIndex, out bool present)
+    private static Saved? TryLoad(SelectedGpu gpu, out bool present)
     {
         string json;
         try
         {
-            present = File.Exists(FilePath(gpuIndex));
+            present = File.Exists(FilePath(gpu.Index));
             if (!present)
             {
                 return null;
             }
 
-            json = File.ReadAllText(FilePath(gpuIndex));
+            json = File.ReadAllText(FilePath(gpu.Index));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
                                        or System.Security.SecurityException)
@@ -170,7 +170,7 @@ internal static class ReferenceCurve
         }
 
         IReadOnlyList<(int Mv, int Mhz)> curve = TuningDocuments.Points(doc);
-        if (!GpuTuning.CurveFreqsReadable(curve))
+        if (!GpuTuning.CurveFreqsReadable(curve) || Compat.HoldsDoubledClocks(doc.AppVersion, gpu.Handle))
         {
             return null;
         }

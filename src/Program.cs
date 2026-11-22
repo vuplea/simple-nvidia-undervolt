@@ -587,6 +587,8 @@ internal static class Cli
             Console.WriteLine($"  {warning}");
         }
 
+        Compat.RequireTrueClocks(doc.AppVersion, gpu.Handle, $"The curve file {inFile}");
+
         if (!ReferenceCurve.AnchorsMatch(points, NvApi.GetVfCurve(gpu.Handle)))
         {
             throw new CliError($"The curve file {inFile} doesn't match this GPU's curve anchors "
@@ -843,6 +845,8 @@ internal static class Cli
         {
             Console.WriteLine($"  {warning}");
         }
+
+        Compat.RequireTrueClocks(doc.AppVersion, gpu.Handle, what);
 
         // The write path refuses an unrecognized card on its own; checking here puts the refusal
         // before any output that reads like progress. The live read also backs the anchor and
