@@ -54,7 +54,7 @@ identity fields and the anchor voltages against the live card.
 
 The tuned range of anchors — `offset` (MHz from stock) is what a re-apply writes, `mhz` (the
 anchor's clock at the moment of tuning) is informative — plus `memoryOffset` (MHz from the factory
-base clock):
+base clock) and `coreOffsetMhz` (a global P0 graphics clock offset, MHz):
 
 ```json
 {
@@ -65,6 +65,7 @@ base clock):
   "gpuName": "NVIDIA GeForce RTX 5090",
   "gpuPciIds": "2B8510DE-89EE1043-000000A1-00002B85",
   "memoryOffset": 1400,
+  "coreOffsetMhz": 100,
   "curve": [
     { "mv": 890, "offset": 480, "mhz": 2820 },
     { "mv": 895, "offset": 480, "mhz": 2850 },

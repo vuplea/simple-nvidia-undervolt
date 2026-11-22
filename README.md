@@ -29,6 +29,10 @@ simple-nvidia-undervolt --mem-pct 5
 simple-nvidia-undervolt --mv-pct -5 --mhz-pct 2 --mem-pct 2 --peak-mv 1060
 # Revert to stock:
 simple-nvidia-undervolt clear
+# Global core clock offset of +50 MHz, no voltage cap:
+simple-nvidia-undervolt --core-offset 50
+# Undervolt with a +100 MHz core offset on top:
+simple-nvidia-undervolt --mv 925 --core-offset 100
 ```
 
 ### Ready-made profiles
@@ -76,6 +80,9 @@ Memory clock (optional):
   --mem <n>         n MHz.
   --mem-offset <n>  base_MHz + n.
   --mem-pct <n>     base_MHz * (1 + n/100).
+Core clock offset (optional):
+  --core-offset <n> Global offset in MHz applied to the P0 graphics clock — like Afterburner's
+                    core clock slider. Works alone or with other tuning options.
 Other:
   --cap-points <n>  Curve anchors holding the cap's offset, counting down from the cap.
                     1 = only the cap point.

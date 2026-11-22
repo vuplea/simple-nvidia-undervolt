@@ -18,6 +18,7 @@ internal sealed class TuningSnapshot
     public Reading<int> MemoryClockKhz { get; init; }
     public Reading<int> BaseMemoryClockKhz { get; init; }
     public Reading<uint> CoreVoltageBoostPercent { get; init; }
+    public Reading<int> CoreClockOffsetMhz { get; init; }
 
     public static TuningSnapshot Read(IntPtr gpu) => new()
     {
@@ -26,6 +27,7 @@ internal sealed class TuningSnapshot
         MemoryClockKhz = Reading.Try(() => ReadMemoryClockKhz(NvApi.GetPstates20(gpu))),
         BaseMemoryClockKhz = Reading.Try(() => (int)NvApi.GetClockFrequencyKhz(gpu, NvApi.CLOCK_FREQ_TYPE_BASE, NvApi.CLOCK_DOMAIN_MEMORY)),
         CoreVoltageBoostPercent = Reading.Try(() => NvApi.GetCoreVoltageBoostPercent(gpu)),
+        CoreClockOffsetMhz = Reading.Try(() => ReadCoreClockOffsetMhz(gpu, NvApi.GetPstates20(gpu))),
     };
 
     /// <summary>Best-effort: the operating point is a detail appended to the offsets line, so a
@@ -47,6 +49,24 @@ internal sealed class TuningSnapshot
     private static int ReadMemoryClockKhz(Pstates20InfoV1 info)
         // Range-type clock: Data0 is the (min == max) frequency.
         => (int)(GpuTuning.P0Clock(info, NvApi.CLOCK_DOMAIN_MEMORY)?.Data0 ?? 0);
+
+    /// <summary>The P0 graphics clock offset in MHz — the global core clock delta this tool
+    /// writes for <c>--core-offset</c>. The GET reports the graphics clock as an absolute
+    /// frequency with any offset folded in, so the delta is measured against the factory base.</summary>
+    private static int ReadCoreClockOffsetMhz(IntPtr gpu, Pstates20InfoV1 info)
+    {
+        Pstate20ClockEntry? entry = GpuTuning.P0Clock(info, NvApi.CLOCK_DOMAIN_GRAPHICS);
+        if (entry is not { } clock)
+        {
+            return 0;
+        }
+
+        uint baseKhz = NvApi.GetClockFrequencyKhz(
+            gpu, NvApi.CLOCK_FREQ_TYPE_BASE, NvApi.CLOCK_DOMAIN_GRAPHICS);
+        return clock.Data0 > 0 && baseKhz > 0
+            ? (int)clock.Data0 - (int)baseKhz
+            : (int)clock.FreqDeltaKhz.Value;
+    }
 
     // --- Display ---
 
@@ -105,4 +125,15 @@ internal sealed class TuningSnapshot
 
     public string DescribeVoltageBoost()
         => CoreVoltageBoostPercent.Ok ? $"{CoreVoltageBoostPercent.Value}%" : CoreVoltageBoostPercent.Error!;
+
+    public string DescribeCoreClockOffset()
+    {
+        if (!CoreClockOffsetMhz.Ok)
+        {
+            return CoreClockOffsetMhz.Error!;
+        }
+
+        int offset = CoreClockOffsetMhz.Value;
+        return offset == 0 ? "stock" : $"{offset:+0;-0} MHz";
+    }
 }
