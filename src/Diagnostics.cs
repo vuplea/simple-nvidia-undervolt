@@ -27,7 +27,7 @@ internal static class Diagnostics
     /// on demand). The control (write) buffer carries no voltage to detect, so it points at snapshot/diff.</summary>
     public static void Layout(IntPtr gpu)
     {
-        if (!CurveLayout.TryDetect(NvApi.ReadVfCurveStatusRaw(gpu), out CurveLayout d))
+        if (!CurveLayout.TryDetect(gpu, out CurveLayout d))
         {
             throw new CliError(
                 "Could not find a V/F curve in the status buffer - its function id or size may differ on "

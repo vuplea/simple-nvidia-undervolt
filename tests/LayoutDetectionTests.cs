@@ -12,7 +12,7 @@ public class LayoutDetectionTests
         byte[] buf = BuildStatus(baseOffset: 0x40, stride: 28, voltOffset: 0x0C, freqOffset: 0x08,
             count: 127, peakBoostKhz: 2_900_000);
 
-        Assert.True(CurveLayout.TryDetect(buf, out var d));
+        Assert.True(CurveLayout.TryDetect(buf, unitsPerKhz: 1, out var d));
         Assert.Equal((28, 0x4C, 0x48, 127), (d.Stride, d.VoltColumn, d.FreqColumn, d.Count));
     }
 
@@ -23,7 +23,7 @@ public class LayoutDetectionTests
         byte[] buf = BuildStatus(baseOffset: 0x20, stride: 32, voltOffset: 0x10, freqOffset: 0x04,
             count: 100, peakBoostKhz: 2_500_000);
 
-        Assert.True(CurveLayout.TryDetect(buf, out var d));
+        Assert.True(CurveLayout.TryDetect(buf, unitsPerKhz: 1, out var d));
         Assert.Equal((32, 0x30, 0x24, 100), (d.Stride, d.VoltColumn, d.FreqColumn, d.Count));
     }
 
@@ -35,15 +35,29 @@ public class LayoutDetectionTests
         byte[] buf = BuildStatus(baseOffset: 0x40, stride: 28, voltOffset: 0x0C, freqOffset: 0x08,
             count: 127, peakBoostKhz: 200_000);
 
-        Assert.True(CurveLayout.TryDetect(buf, out var d));
+        Assert.True(CurveLayout.TryDetect(buf, unitsPerKhz: 1, out var d));
         Assert.Equal((28, 0x4C, 127), (d.Stride, d.VoltColumn, d.Count));
         Assert.Equal(-1, d.FreqColumn);
     }
 
     [Fact]
+    public void HalfKhzBuffer_IsJudgedInTrueKhz()
+    {
+        // A Pascal curve peaking at 2010 MHz stores 4,020,000 - past the plausible ceiling read raw.
+        byte[] buf = BuildStatus(baseOffset: 0x40, stride: 28, voltOffset: 0x0C, freqOffset: 0x08,
+            count: 80, peakBoostKhz: 4_020_000);
+
+        Assert.True(CurveLayout.TryDetect(buf, unitsPerKhz: 2, out var d));
+        Assert.Equal(0x48, d.FreqColumn);
+
+        Assert.True(CurveLayout.TryDetect(buf, unitsPerKhz: 1, out var raw));
+        Assert.Equal(-1, raw.FreqColumn);
+    }
+
+    [Fact]
     public void NoCurve_ReturnsFalse()
     {
-        Assert.False(CurveLayout.TryDetect(new byte[7208], out _));
+        Assert.False(CurveLayout.TryDetect(new byte[7208], unitsPerKhz: 1, out _));
     }
 
     [Fact]

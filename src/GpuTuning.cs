@@ -772,7 +772,7 @@ internal static class GpuTuning
     {
         try
         {
-            string detected = CurveLayout.TryDetect(NvApi.ReadVfCurveStatusRaw(gpu), out CurveLayout d)
+            string detected = CurveLayout.TryDetect(gpu, out CurveLayout d)
                 ? DetectedLine(d)
                 : "detected: no V/F curve found in the status buffer";
             return new[] { BuildLine, detected, CompiledLine };

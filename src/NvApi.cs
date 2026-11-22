@@ -453,10 +453,10 @@ internal static class NvApi
     /// slot 80 on Pascal) end the walk outright, so one can't slip in as a curve anchor even with a
     /// voltage that happens to continue the ascent.</summary>
     public static IReadOnlyList<(int Mv, int Mhz)> GetVfCurve(IntPtr gpu)
-        => DecodeVfCurve(ReadVfCurveStatusRaw(gpu), CurveUnitsPerKhz(ArchitectureId(gpu)));
+        => DecodeVfCurve(ReadVfCurveStatusRaw(gpu), CurveUnitsPerKhz(gpu));
 
     /// <summary>Decodes a status buffer whose frequencies count <paramref name="unitsPerKhz"/> to
-    /// the kHz (<see cref="CurveUnitsPerKhz"/>).</summary>
+    /// the kHz (<see cref="CurveUnitsPerKhz(IntPtr)"/>).</summary>
     internal static IReadOnlyList<(int Mv, int Mhz)> DecodeVfCurve(byte[] bytes, int unitsPerKhz)
     {
         var points = new List<(int Mv, int Mhz)>();
@@ -494,7 +494,10 @@ internal static class NvApi
     // Pascal counts the graphics curve in HALF-kHz units - the status frequencies and the control
     // table's deltas alike (1873 MHz reads 3746000; a delta of 200000 moves an anchor 100 MHz) -
     // while Turing and later use plain kHz. The curve helpers read/write true kHz and convert at
-    // the field, so nothing else in the codebase sees the unit.
+    // the field, so only code reading a raw buffer (CurveLayout) sees the unit.
+
+    /// <summary>The card's curve unit: raw field units per kHz.</summary>
+    public static int CurveUnitsPerKhz(IntPtr gpu) => CurveUnitsPerKhz(ArchitectureId(gpu));
 
     /// <summary>Raw field units per kHz for the curve's frequencies and deltas: 2 on Pascal, 1 on
     /// everything else - Volta (untested) and an unreadable architecture included. The
@@ -525,7 +528,7 @@ internal static class NvApi
     /// (the delta of anchor i is read from control entry i-1).</summary>
     public static int[] GetCurveFreqDeltasKhz(IntPtr gpu, int count)
     {
-        int scale = CurveUnitsPerKhz(ArchitectureId(gpu));
+        int scale = CurveUnitsPerKhz(gpu);
         byte[] bytes = ReadRaw(gpu, ID_GPU_GetClockBoostTable, 1, CONTROL_TABLE_SIZE, CONTROL_TABLE_SIZE,
             GetVfPointsMask(gpu));
 
@@ -551,7 +554,7 @@ internal static class NvApi
                 $"{deltasKhz.Length} curve deltas don't fit the {CONTROL_TABLE_SIZE}-byte control table.");
         }
 
-        int scale = CurveUnitsPerKhz(ArchitectureId(gpu));
+        int scale = CurveUnitsPerKhz(gpu);
         byte[] mask = GetVfPointsMask(gpu);
         IntPtr buffer = AllocZeroed(CONTROL_TABLE_SIZE);
         try

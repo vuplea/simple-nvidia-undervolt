@@ -20,12 +20,17 @@ internal readonly record struct CurveLayout(int Stride, int VoltColumn, int Freq
     // Small non-monotonic noise the frequency column may carry without being rejected.
     private const int FreqDipToleranceKhz = 100_000;
 
+    /// <summary>Detects the layout of the card's live status buffer.</summary>
+    public static bool TryDetect(IntPtr gpu, out CurveLayout layout)
+        => TryDetect(NvApi.ReadVfCurveStatusRaw(gpu), NvApi.CurveUnitsPerKhz(gpu), out layout);
+
     /// <summary>Finds the layout by locating the longest run of strictly-ascending plausible core voltages:
     /// its spacing is the stride and its start the voltage column (the voltage axis is power-state
     /// independent, so this always works). The frequency column is the other word in the same record that
     /// climbs to a real boost clock without dropping; in a collapsed read it can't be identified and is
-    /// reported as -1. Base and in-record offsets aren't separable from one column, so both are absolute.</summary>
-    public static bool TryDetect(byte[] buf, out CurveLayout layout)
+    /// reported as -1. Base and in-record offsets aren't separable from one column, so both are absolute.
+    /// Frequencies are judged in true kHz, <paramref name="unitsPerKhz"/> raw units each.</summary>
+    public static bool TryDetect(byte[] buf, int unitsPerKhz, out CurveLayout layout)
     {
         layout = default;
         int bestStride = 0, bestVolt = 0, bestRun = 0;
@@ -47,7 +52,7 @@ internal readonly record struct CurveLayout(int Stride, int VoltColumn, int Freq
             return false;
         }
 
-        int freqColumn = DetectFreqColumn(buf, bestVolt, bestStride, bestRun);
+        int freqColumn = DetectFreqColumn(buf, bestVolt, bestStride, bestRun, unitsPerKhz);
         layout = new CurveLayout(bestStride, bestVolt, freqColumn, bestRun);
         return true;
     }
@@ -102,7 +107,8 @@ internal readonly record struct CurveLayout(int Stride, int VoltColumn, int Freq
     /// if none does. Requiring the climb (not just a high value) means a collapsed curve reports -1
     /// rather than latching a static max-clock field that happens to sit at a boost value. Candidates lie
     /// within one stride of the voltage column.</summary>
-    private static int DetectFreqColumn(byte[] buf, int voltColumn, int stride, int count)
+    private static int DetectFreqColumn(byte[] buf, int voltColumn, int stride, int count,
+        int unitsPerKhz)
     {
         for (int col = voltColumn - (stride - 4); col <= voltColumn + (stride - 4); col += 4)
         {
@@ -122,8 +128,9 @@ internal readonly record struct CurveLayout(int Stride, int VoltColumn, int Freq
                     break;
                 }
 
-                int v = BitConverter.ToInt32(buf, pos);
-                if (v < 0 || v > MaxPlausibleFreqKhz || v < last - FreqDipToleranceKhz)
+                int raw = BitConverter.ToInt32(buf, pos);
+                int v = raw / unitsPerKhz;
+                if (raw < 0 || v > MaxPlausibleFreqKhz || v < last - FreqDipToleranceKhz)
                 {
                     ok = false;
                     break;
